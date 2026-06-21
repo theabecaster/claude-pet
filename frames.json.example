@@ -1,12 +1,7 @@
 {
-  "frameWidth": 16,
-  "frameHeight": 16,
-  "scale": 4,
-  "fps": 8,
-  "animations": {
-    "idle":    [0],
-    "running": [1, 2, 3],
-    "waiting": [0],
-    "done":    [4]
-  }
+  "_comment": "Defaults match the Codex pet atlas exactly (8x9 grid, 192x208 cells). You only need this file to override the look or use a NON-Codex sheet. Omit 'animations' to use the built-in Codex row map (idle, running-right, running-left, waving, jumping, failed, waiting, running, review). Frame numbers are row-major: index = row*8 + column.",
+  "frameWidth": 192,
+  "frameHeight": 208,
+  "scale": 0.42,
+  "fps": 8
 }
