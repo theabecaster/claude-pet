@@ -463,17 +463,28 @@ let HOOK_WIRING: [(event: String, state: String, matcher: Bool)] = [
 
 func selfExecPath() -> String { Bundle.main.executablePath ?? CommandLine.arguments[0] }
 
-// Claude Code delivers event JSON on stdin. Read it WITHOUT blocking when no
-// data is piped (manual runs), via a zero-timeout poll.
+// Claude Code delivers event JSON on stdin. Read it without ever blocking the
+// session: stdin is switched to non-blocking and drained with a hard time cap,
+// so a hook can never hang (e.g. if the writer keeps the pipe open).
 func readHookInput() -> (session: String, cwd: String?) {
     var session = "default"; var cwd: String? = nil
-    var fds = pollfd(fd: 0, events: Int16(POLLIN), revents: 0)
-    if poll(&fds, 1, 0) > 0, (fds.revents & Int16(POLLIN)) != 0 {
-        let data = FileHandle.standardInput.readDataToEndOfFile()
-        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let s = obj["session_id"] as? String, !s.isEmpty { session = s }
-            cwd = obj["cwd"] as? String
-        }
+    let fd: Int32 = 0
+    var data = Data()
+    var buf = [UInt8](repeating: 0, count: 4096)
+    // Every read is gated by poll, so we only read when bytes are guaranteed
+    // ready — read() then can't block. Wait up to 50ms for the first bytes;
+    // once draining, stop the instant nothing more is immediately available.
+    while data.count < 1 << 20 {
+        var fds = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let r = poll(&fds, 1, data.isEmpty ? 50 : 0)
+        if r <= 0 { break }                       // timeout / nothing more ready
+        if (fds.revents & Int16(POLLIN)) == 0 { break }
+        let n = read(fd, &buf, buf.count)
+        if n > 0 { data.append(buf, count: n) } else { break }   // EOF or error
+    }
+    if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        if let s = obj["session_id"] as? String, !s.isEmpty { session = s }
+        cwd = obj["cwd"] as? String
     }
     return (session, cwd)
 }

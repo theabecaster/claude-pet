@@ -4,7 +4,17 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "Installing Claude Pet…"
-pkill -f ClaudePet 2>/dev/null || true
+
+# Fully stop any running copy before replacing it, so the copy can't hang on a
+# busy binary. Wait for it to actually exit.
+pkill -x ClaudePet 2>/dev/null || true
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  pgrep -x ClaudePet >/dev/null 2>&1 || break
+  sleep 0.3
+done
+pkill -9 -x ClaudePet 2>/dev/null || true
+rm -f "$HOME/.claude-pet/pet.lock" "$HOME/.claude-pet/pet.pid" 2>/dev/null || true
+
 rm -rf "/Applications/ClaudePet.app"
 cp -R "$DIR/ClaudePet.app" "/Applications/ClaudePet.app"
 
@@ -12,7 +22,7 @@ cp -R "$DIR/ClaudePet.app" "/Applications/ClaudePet.app"
 xattr -dr com.apple.quarantine "/Applications/ClaudePet.app" 2>/dev/null || true
 
 # Wire Claude Code hooks (non-destructive — existing hooks are preserved).
-"/Applications/ClaudePet.app/Contents/MacOS/ClaudePet" --install-hooks
+"/Applications/ClaudePet.app/Contents/MacOS/ClaudePet" --install-hooks < /dev/null
 
 open "/Applications/ClaudePet.app"
 
