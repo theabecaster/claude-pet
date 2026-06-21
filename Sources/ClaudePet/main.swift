@@ -528,6 +528,11 @@ func ensureRunning() {
     let t = Process()
     t.executableURL = URL(fileURLWithPath: selfExecPath())
     t.arguments = []
+    // Fully detach: never inherit the caller's stdio, or the caller (a hook, a
+    // shell) would block until the long-lived GUI exits. Own session too.
+    t.standardInput = FileHandle.nullDevice
+    t.standardOutput = FileHandle.nullDevice
+    t.standardError = FileHandle.nullDevice
     try? t.run()
 }
 
