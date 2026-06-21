@@ -59,6 +59,8 @@ then settles down again once handled. `ready` gives a soft positive nudge,
 
 ## Multiple sessions — one tidy stack
 
+<p align="center"><img src="docs/stack.png" width="240" alt="Multi-session stack: selected pet with a list of sessions above it"></p>
+
 Run several Claude Code sessions at once and you get **one cohesive stack**, not a
 mess of windows. The **selected** session shows as the big pet in the corner; all
 your sessions appear in a clean list above it, in a **stable order that never
