@@ -19,6 +19,9 @@ jobs:
       - name: Build (release)
         run: swift build -c release
 
+      - name: Interaction self-test (real NSEvents through the handlers)
+        run: .build/release/ClaudePet --selftest
+
       - name: Smoke test (CLI paths, no GUI)
         run: |
           .build/release/ClaudePet --state running < /dev/null

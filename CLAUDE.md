@@ -17,6 +17,7 @@ swift build -c release                                  # build (the only build 
 .build/release/ClaudePet --state waiting                # simulate a hook firing
 .build/release/ClaudePet --render running /tmp/p.png    # offscreen PNG preview of a state
 .build/release/ClaudePet --render-stack /tmp/s.png      # offscreen preview of the multi-session stack
+.build/release/ClaudePet --selftest                    # drive real NSEvent click/drag through handlers (CI gate)
 .build/release/ClaudePet --make-icon /tmp/icon.png      # render the app icon
 .build/release/ClaudePet --aititle /path/to/transcript.jsonl   # debug AI-title parsing
 

@@ -408,7 +408,8 @@ final class StackView: NSView {
 
     let W: CGFloat = 232, PETH: CGFloat = 158
     let rowH: CGFloat = 26, innerPad: CGFloat = 7, margin: CGFloat = 8, gap: CGFloat = 6
-    private var lastMouse = NSPoint.zero
+    private var downInWin = NSPoint.zero    // mouse-down point in view coords
+    private var lastScreen = NSPoint.zero   // for window dragging (screen coords)
     private var moved: CGFloat = 0
     private var dragIndex: Int? = nil       // row being dragged (reorder)
     private var windowDrag = false
@@ -490,21 +491,23 @@ final class StackView: NSView {
     override func mouseExited(with e: NSEvent) { if hoveredRow != -1 { hoveredRow = -1; needsDisplay = true } }
 
     override func mouseDown(with e: NSEvent) {
-        lastMouse = NSEvent.mouseLocation; moved = 0
-        if let i = rowIndex(at: convert(e.locationInWindow, from: nil)) { dragIndex = i; windowDrag = false }
+        downInWin = convert(e.locationInWindow, from: nil)
+        lastScreen = NSEvent.mouseLocation; moved = 0
+        if let i = rowIndex(at: downInWin) { dragIndex = i; windowDrag = false }
         else { dragIndex = nil; windowDrag = true }            // pet/empty -> move the widget
     }
     override func mouseDragged(with e: NSEvent) {
-        let now = NSEvent.mouseLocation
-        moved += abs(now.x - lastMouse.x) + abs(now.y - lastMouse.y)
+        let p = convert(e.locationInWindow, from: nil)
+        moved = max(moved, hypot(p.x - downInWin.x, p.y - downInWin.y))
         if windowDrag {
-            if let win = window { var o = win.frame.origin; o.x += now.x - lastMouse.x; o.y += now.y - lastMouse.y; win.setFrameOrigin(o) }
+            let now = NSEvent.mouseLocation
+            if let win = window { var o = win.frame.origin; o.x += now.x - lastScreen.x; o.y += now.y - lastScreen.y; win.setFrameOrigin(o) }
+            lastScreen = now
         } else if let di = dragIndex, moved > 3 {               // reorder this row live
-            if let t = rowIndex(at: convert(e.locationInWindow, from: nil), clamp: true), t != di {
+            if let t = rowIndex(at: p, clamp: true), t != di {
                 let it = items.remove(at: di); items.insert(it, at: t); dragIndex = t; needsDisplay = true
             }
         }
-        lastMouse = now
     }
     override func mouseUp(with e: NSEvent) {
         if let di = dragIndex {
@@ -840,6 +843,67 @@ func renderIcon(to path: String, size: Int = 1024) {
     }
 }
 
+// Drives REAL NSEvents through StackView's actual mouse handlers and asserts the
+// interaction outcomes (click selects; drag reorders; click-pet does not select).
+func selfTest() -> Bool {
+    _ = NSApplication.shared
+    let sv = StackView(frame: NSRect(x: 0, y: 0, width: 232, height: 200))
+    let items = [SessionItem(id: "a", state: "running", label: "alpha"),
+                 SessionItem(id: "b", state: "waiting", label: "bravo"),
+                 SessionItem(id: "c", state: "idle", label: "charlie")]
+    sv.items = items; sv.selectedID = "a"
+    let h = sv.desiredHeight()
+    sv.frame = NSRect(x: 0, y: 0, width: sv.W, height: h)
+    let win = NSWindow(contentRect: sv.frame, styleMask: .borderless, backing: .buffered, defer: false)
+    win.contentView = sv
+    sv.layoutContents()
+
+    var selected: String? = nil
+    var reordered: [String]? = nil
+    sv.onSelect = { selected = $0 }
+    sv.onReorder = { reordered = $0 }
+
+    func rowCenter(_ i: Int) -> NSPoint {
+        let panel = sv.panelRect()
+        return NSPoint(x: panel.midX, y: panel.maxY - sv.innerPad - (CGFloat(i) + 0.5) * sv.rowH)
+    }
+    func evt(_ type: NSEvent.EventType, _ p: NSPoint) -> NSEvent {
+        NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0,
+                           windowNumber: win.windowNumber, context: nil, eventNumber: 0,
+                           clickCount: 1, pressure: 1)!
+    }
+    func click(_ p: NSPoint) { sv.mouseDown(with: evt(.leftMouseDown, p)); sv.mouseUp(with: evt(.leftMouseUp, p)) }
+    func drag(_ from: NSPoint, _ via: [NSPoint], _ to: NSPoint) {
+        sv.mouseDown(with: evt(.leftMouseDown, from))
+        for v in via { sv.mouseDragged(with: evt(.leftMouseDragged, v)) }
+        sv.mouseDragged(with: evt(.leftMouseDragged, to))
+        sv.mouseUp(with: evt(.leftMouseUp, to))
+    }
+
+    var ok = true
+    func check(_ name: String, _ cond: Bool) { print("  [\(cond ? "PASS" : "FAIL")] \(name)"); ok = ok && cond }
+
+    // 1) Click row 1 ("bravo") -> selects "b", order unchanged.
+    selected = nil; reordered = nil
+    click(rowCenter(1))
+    check("click row selects that session", selected == "b")
+    check("click does NOT reorder", reordered == nil)
+
+    // 2) Click the pet area (below the list) -> no selection change.
+    selected = nil
+    click(NSPoint(x: sv.W / 2, y: sv.margin + 10))
+    check("click on pet does not select a row", selected == nil)
+
+    // 3) Drag row 0 ("a") down to the bottom -> order changes, "a" moves off the top.
+    sv.items = items; sv.selectedID = "a"; reordered = nil
+    drag(rowCenter(0), [rowCenter(1)], rowCenter(2))
+    check("drag reorders the list", reordered != nil)
+    check("dragged row left the top slot", (reordered?.first ?? "a") != "a")
+
+    print(ok ? "SELFTEST: ALL PASS" : "SELFTEST: FAILURES")
+    return ok
+}
+
 func renderStack(to path: String) {
     _ = NSApplication.shared
     let sv = StackView(frame: NSRect(x: 0, y: 0, width: 232, height: 200))
@@ -906,6 +970,8 @@ if args.count >= 2 {
         renderIcon(to: args.count >= 3 ? args[2] : "/tmp/AppIcon.png"); exit(0)
     case "--render-stack":
         renderStack(to: args.count >= 3 ? args[2] : "/tmp/stack.png"); exit(0)
+    case "--selftest":
+        exit(selfTest() ? 0 : 1)
     case "--aititle":
         print(readAITitle(args.count >= 3 ? args[2] : "") ?? "(no title)"); exit(0)
     default: break
