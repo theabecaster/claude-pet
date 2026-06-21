@@ -103,8 +103,8 @@ pruned). A **single session** is just the one pet with its name shown beneath.
    **wires the Claude Code hooks itself** on first launch.
 3. Restart Claude Code. Your pet appears and reacts.
 
-Control it from the **✳ menu-bar icon**: show/hide, load a pet, reset to default,
-reinstall hooks, or uninstall. (No installer scripts — the app installs and removes
+Control it from the **✳ menu-bar icon**: show/hide, get custom pets, load a pet,
+reset to default, reinstall hooks, or uninstall. (No installer scripts — the app installs and removes
 itself, so there's never a quarantine-gated `.command` to fight.)
 
 ### One-click (for technical friends)
@@ -118,6 +118,9 @@ Builds and wires hooks (non-destructive — your existing hooks are preserved).
 
 ## Load a custom pet
 
+- **Menu bar → ✳ → Get Custom Pets (codex-pets.net)…** opens the pet gallery in
+  your browser and walks you through the two steps: download a pet's
+  `spritesheet.webp`, then **Load Pet…** to apply it, **or**
 - **Menu bar → ✳ → Load Pet…** and pick a Codex `spritesheet.webp`, a `.png`
   sheet, or a whole pet folder, **or**
 - `./load-pet.sh https://codex-pets.net/assets/pets/v/…/spritesheet.webp`

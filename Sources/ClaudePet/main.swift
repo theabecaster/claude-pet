@@ -470,6 +470,7 @@ final class StackView: NSView {
     private var scrollAccum: CGFloat = 0
 
     var showList: Bool { items.count > 1 }
+    var isReordering: Bool { dragging }    // true mid-drag: sync() must not clobber `items`
 
     override init(frame f: NSRect) { super.init(frame: f); addSubview(primary) }
     required init?(coder: NSCoder) { fatalError() }
@@ -618,6 +619,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Show / Hide", action: #selector(toggleVisibility), keyEquivalent: "p"))
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Get Custom Pets (codex-pets.net)…", action: #selector(browseCustomPets), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Load Pet… (Codex .webp or folder)", action: #selector(loadSprite), keyEquivalent: "l"))
         menu.addItem(NSMenuItem(title: "Reset to Default Pet", action: #selector(resetSprite), keyEquivalent: ""))
         menu.addItem(.separator())
@@ -640,6 +642,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func toggleVisibility() {
         hidden.toggle()
         if hidden { window.orderOut(nil) } else { window.orderFrontRegardless() }
+    }
+    // Facilitate getting a custom pet: open the gallery, then spell out the two-step
+    // flow (download a sheet → Load Pet…) so it's obvious how to apply what you find.
+    @objc func browseCustomPets() {
+        if let url = URL(string: "https://codex-pets.net") { NSWorkspace.shared.open(url) }
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = "Find a custom pet at codex-pets.net"
+        a.informativeText = "Opened the pet gallery in your browser.\n\n1. Download a pet's spritesheet (.webp).\n2. Come back here and choose “Load Pet…” to apply it.\n\nClaude Pet is compatible with any Codex pet sprite."
+        a.addButton(withTitle: "Load Pet…")
+        a.addButton(withTitle: "Done")
+        if a.runModal() == .alertFirstButtonReturn { loadSprite() }
     }
     @objc func loadSprite() {
         NSApp.activate(ignoringOtherApps: true)
@@ -790,7 +804,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if selectedID == nil || live[selectedID!] == nil { selectedID = order.first }
 
         let sel = live[selectedID!]!
-        stack.items = order.compactMap { id in live[id].map { SessionItem(id: id, state: $0.st.state, label: label(id, $0.st) ?? String(id.prefix(6))) } }
+        // Don't clobber a live reorder: while a row is being dragged, `items` holds the
+        // in-progress order but `order` isn't committed until mouseUp. Rebuilding from
+        // `order` here would snap the grabbed row back and leave dragIndex pointing at
+        // the wrong item. Resume rebuilding once the drag commits.
+        if !stack.isReordering {
+            stack.items = order.compactMap { id in live[id].map { SessionItem(id: id, state: $0.st.state, label: label(id, $0.st) ?? String(id.prefix(6))) } }
+        }
         stack.selectedID = selectedID
         stack.primary.caption = label(selectedID!, sel.st)     // shown for single AND multi (wraps to 2 lines)
         let key = selectedID! + "|" + sel.st.state
@@ -1040,6 +1060,15 @@ func selfTest() -> Bool {
     drag(rowCenter(0), [rowCenter(1)], rowCenter(2))
     check("drag reorders the list", reordered != nil)
     check("dragged row left the top slot", (reordered?.first ?? "a") != "a")
+
+    // 4) Mid-drag, isReordering is true so the timer's sync() won't rebuild `items`
+    //    from the uncommitted `order` and snap the grabbed row back (the reorder bug).
+    sv.items = items; sv.selectedID = "a"
+    sv.mouseDown(with: evt(.leftMouseDown, rowCenter(0)))
+    sv.mouseDragged(with: evt(.leftMouseDragged, rowCenter(1)))
+    check("isReordering guards sync mid-drag", sv.isReordering)
+    sv.mouseUp(with: evt(.leftMouseUp, rowCenter(1)))
+    check("isReordering clears after drag", !sv.isReordering)
 
     print(ok ? "SELFTEST: ALL PASS" : "SELFTEST: FAILURES")
     return ok

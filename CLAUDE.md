@@ -66,7 +66,11 @@ list above it inside `StackView`, with the selected row highlighted. Interaction
 `StackView`: **click a row** → `onSelect` (just changes selection), **scroll** → `onCycle`
 (steps selection), **drag a row** → `onReorder` (the row lifts and follows the cursor; mutates
 `order`), **drag the pet/empty area** → moves the window. The window is bottom-anchored so the
-pet stays put. A single session hides the list and just shows the pet with its name.
+pet stays put. A live reorder mutates `StackView.items` immediately but only commits to `order`
+(via `onReorder`) on mouseUp; `sync()` must therefore skip its `stack.items` rebuild while
+`stack.isReordering` is true — otherwise the 0.25s timer reverts `items` to the uncommitted
+`order` mid-drag and the grabbed row snaps back onto the row you hovered. A single session
+hides the list and just shows the pet with its name.
 
 The user's manual arrangement (`order` + `selectedID`) is persisted to
 `~/.claude-pet/layout.json` and restored on launch (stale ids pruned in `sync()`), so it
@@ -240,9 +244,11 @@ The zip contains **only the notarized `ClaudePet.app`** — drag to `/Applicatio
 builds are **signed with a Developer ID and notarized** (when the CI secrets are configured), so
 they launch with no Gatekeeper prompt. **The app is its own installer**: on launch the GUI calls
 `hooksPointToSelf()` and runs `installHooks()` if the hooks are missing or point at a different
-path (so moving the app self-heals the absolute hook path). The **✳ menu** exposes *Reinstall
-Claude Code Hooks* (`reinstallHooks`) and *Uninstall Claude Pet…* (`uninstallSelf` — unwires
-hooks, deletes `~/.claude-pet`, removes the bundle, quits). We deliberately ship **no `.command`
+path (so moving the app self-heals the absolute hook path). The **✳ menu** exposes *Get Custom
+Pets (codex-pets.net)…* (`browseCustomPets` — opens the gallery in the browser and spells out
+the download → *Load Pet…* flow), *Reinstall Claude Code Hooks* (`reinstallHooks`) and
+*Uninstall Claude Pet…* (`uninstallSelf` — unwires hooks, deletes `~/.claude-pet`, removes the
+bundle, quits). We deliberately ship **no `.command`
 scripts**: a downloaded script is always quarantine-gated, which defeated the old installer. If a
 build ever ships only ad-hoc-signed (secrets missing), the app still launches but hits the
 recoverable "unidentified developer → Open Anyway" prompt — not the fatal "damaged — move to
