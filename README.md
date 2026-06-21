@@ -52,10 +52,13 @@ the folder and animates. `waving` and `jumping` are one-shots that settle into
 ## Multiple sessions
 
 Run several Claude Code sessions at once and you get **one pet per session**,
-arranged along the bottom-right and labeled with each project name. A pet appears
-when its session starts, tracks that session's state independently, and
-disappears when the session ends (stale sessions are pruned automatically). A
-single session shows a single, unlabeled pet.
+arranged along the bottom-right. Each pet is labeled with that session's
+**AI-generated title** (the same name Claude Code shows in its session list,
+read from the transcript) — e.g. *“Validate race prediction methodology”* —
+falling back to the project folder name. A pet appears when its session starts,
+tracks that session's state independently, and disappears when the session ends
+(stale sessions are pruned automatically). A new session with no title yet, when
+it's the only one, shows a clean unlabeled pet.
 
 ## Install
 

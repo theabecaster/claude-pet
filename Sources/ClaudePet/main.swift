@@ -70,7 +70,26 @@ func loadFrames() -> Frames {
     return Frames()
 }
 
-struct PetState: Codable { var state = "idle"; var cwd: String?; var detail: String? }
+struct PetState: Codable { var state = "idle"; var cwd: String?; var transcript: String?; var detail: String? }
+
+// Read the session's AI-generated title from its transcript (JSONL). Titles are
+// appended as records of type "ai-title"; the latest one near the end wins. Only
+// the file tail is scanned so this stays cheap even for large transcripts.
+func readAITitle(_ path: String) -> String? {
+    guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
+    defer { try? fh.close() }
+    let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int ?? 0
+    let chunk = 65536
+    if size > chunk { try? fh.seek(toOffset: UInt64(size - chunk)) }
+    guard let data = try? fh.readToEnd(), let text = String(data: data, encoding: .utf8) else { return nil }
+    var title: String?
+    for line in text.split(separator: "\n") where line.contains("\"type\":\"ai-title\"") {
+        if let d = line.data(using: .utf8),
+           let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+           let t = o["aiTitle"] as? String, !t.isEmpty { title = t }
+    }
+    return title
+}
 
 // MARK: - State model: Claude Code session state -> Codex animation row
 
@@ -238,19 +257,31 @@ final class PetView: NSView {
         } else {
             drawPlaceholder(in: dest)
         }
-        if let label = bubbleLabel { drawBubble(label, dot: bubbleDot, above: dest) }
-        if let cap = caption { drawCaption(cap) }
+        // Stack upward from the pet: pet -> status pill -> caption.
+        var topY = dest.maxY
+        if let label = bubbleLabel { topY = drawBubble(label, dot: bubbleDot, above: dest) }
+        if let cap = caption { drawCaption(cap, atY: topY + 5) }
     }
 
-    // Small dim project label (top of window) so pets from different sessions
-    // are distinguishable at a glance.
-    private func drawCaption(_ text: String) {
+    // Small dim project label sitting just above the status pill so pets from
+    // different sessions are distinguishable at a glance.
+    private func drawCaption(_ text: String, atY y: CGFloat) {
         let font: NSFont = NSFont(name: "Menlo", size: 9) ?? NSFont.systemFont(ofSize: 9)
-        let s = text as NSString
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG.withAlphaComponent(0.7)]
+        let maxW = bounds.width - 6
+        // Truncate long session titles with an ellipsis so they fit the pet width.
+        var display = text
+        if (display as NSString).size(withAttributes: attrs).width > maxW {
+            while display.count > 1,
+                  ((display + "…") as NSString).size(withAttributes: attrs).width > maxW {
+                display = String(display.dropLast())
+            }
+            display += "…"
+        }
+        let s = display as NSString
         let sz = s.size(withAttributes: attrs)
         let x = min(max(2, (bounds.width - sz.width) / 2), bounds.width - sz.width - 2)
-        s.draw(at: NSPoint(x: x, y: bounds.height - sz.height - 2), withAttributes: attrs)
+        s.draw(at: NSPoint(x: x, y: min(y, bounds.height - sz.height - 2)), withAttributes: attrs)
     }
 
     private func stateAccent() -> NSColor {
@@ -269,7 +300,9 @@ final class PetView: NSView {
     }
 
     // Terminal-style status pill: dark bg, coral hairline border, mono label, status dot.
-    private func drawBubble(_ label: String, dot: NSColor?, above rect: NSRect) {
+    // Returns the pill's top Y so callers can stack content above it.
+    @discardableResult
+    private func drawBubble(_ label: String, dot: NSColor?, above rect: NSRect) -> CGFloat {
         let font: NSFont = NSFont(name: "Menlo", size: 11) ?? NSFont.boldSystemFont(ofSize: 11)
         let text = label as NSString
         let tAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG]
@@ -289,6 +322,7 @@ final class PetView: NSView {
             cursor += dotR * 2 + gap
         }
         text.draw(at: NSPoint(x: cursor, y: br.midY - tSize.height / 2), withAttributes: tAttrs)
+        return br.maxY
     }
 }
 
@@ -299,6 +333,8 @@ final class PetWindow {
     let window: NSWindow
     let view: PetView
     var appliedState = ""
+    var titleMtime: Date?
+    var cachedTitle: String?
 
     init() {
         view = PetView(frame: NSRect(x: 0, y: 0, width: 170, height: 210))
@@ -424,8 +460,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let pet: PetWindow
             if let existing = pets[id] { pet = existing }
             else { pet = PetWindow(); pets[id] = pet; changed = true; if hidden { pet.close() } }
-            // Show the project label only when more than one session is active.
-            let cap = live.count > 1 ? st.cwd.map { URL(fileURLWithPath: $0).lastPathComponent } : nil
+            // Prefer Claude Code's AI-generated session title (cached, refreshed
+            // when the transcript changes); fall back to the project folder name
+            // when there are multiple sessions.
+            if let tp = st.transcript {
+                let m = (try? fm.attributesOfItem(atPath: tp))?[.modificationDate] as? Date
+                if pet.titleMtime != m { pet.titleMtime = m; pet.cachedTitle = readAITitle(tp) }
+            }
+            let folder = st.cwd.map { URL(fileURLWithPath: $0).lastPathComponent }
+            let cap = pet.cachedTitle ?? (live.count > 1 ? folder : nil)
             if pet.view.caption != cap { pet.view.caption = cap; pet.view.needsDisplay = true }
             if pet.appliedState != st.state {          // only apply on change (preserve one-shots)
                 pet.appliedState = st.state
@@ -440,7 +483,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func relayout() {
         guard let vf = NSScreen.main?.visibleFrame else { return }
         for (i, id) in pets.keys.sorted().enumerated() {
-            pets[id]?.place(NSPoint(x: vf.maxX - 190 - CGFloat(i) * 160, y: vf.minY + 28))
+            pets[id]?.place(NSPoint(x: vf.maxX - 190 - CGFloat(i) * 185, y: vf.minY + 28))
         }
     }
 }
@@ -466,8 +509,8 @@ func selfExecPath() -> String { Bundle.main.executablePath ?? CommandLine.argume
 // Claude Code delivers event JSON on stdin. Read it without ever blocking the
 // session: stdin is switched to non-blocking and drained with a hard time cap,
 // so a hook can never hang (e.g. if the writer keeps the pipe open).
-func readHookInput() -> (session: String, cwd: String?) {
-    var session = "default"; var cwd: String? = nil
+func readHookInput() -> (session: String, cwd: String?, transcript: String?) {
+    var session = "default"; var cwd: String? = nil; var transcript: String? = nil
     let fd: Int32 = 0
     var data = Data()
     var buf = [UInt8](repeating: 0, count: 4096)
@@ -485,8 +528,9 @@ func readHookInput() -> (session: String, cwd: String?) {
     if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         if let s = obj["session_id"] as? String, !s.isEmpty { session = s }
         cwd = obj["cwd"] as? String
+        transcript = obj["transcript_path"] as? String
     }
-    return (session, cwd)
+    return (session, cwd, transcript)
 }
 
 func writeState(_ state: String) {
@@ -499,6 +543,7 @@ func writeState(_ state: String) {
     }
     var obj: [String: Any] = ["state": state]
     if let c = info.cwd { obj["cwd"] = c }
+    if let t = info.transcript { obj["transcript"] = t }
     if let data = try? JSONSerialization.data(withJSONObject: obj) {
         try? data.write(to: file)
     }
@@ -620,6 +665,7 @@ func renderState(_ state: String, to path: String) {
     let v = PetView(frame: NSRect(x: 0, y: 0, width: 170, height: 210))
     v.cfg = loadFrames()
     v.sprite = loadActiveSprite()
+    v.caption = ProcessInfo.processInfo.environment["CLAUDEPET_CAPTION"]   // QA preview only
     v.setState(state)
     v.frameIndex = 1
     guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
@@ -650,6 +696,8 @@ if args.count >= 2 {
                     to: args.count >= 4 ? args[3] : "/tmp/pet.png"); exit(0)
     case "--make-icon":
         renderIcon(to: args.count >= 3 ? args[2] : "/tmp/AppIcon.png"); exit(0)
+    case "--aititle":
+        print(readAITitle(args.count >= 3 ? args[2] : "") ?? "(no title)"); exit(0)
     default: break
     }
 }
