@@ -7,11 +7,14 @@ import UniformTypeIdentifiers
 
 let home = FileManager.default.homeDirectoryForCurrentUser
 let stateDir = home.appendingPathComponent(".claude-pet")
-let stateFileURL = stateDir.appendingPathComponent("state.json")
 let pidURL = stateDir.appendingPathComponent("pet.pid")
 let petsDir = stateDir.appendingPathComponent("pets")
 let framesURL = stateDir.appendingPathComponent("frames.json")
 let settingsURL = home.appendingPathComponent(".claude/settings.json")
+// One state file per Claude Code session -> one pet per session.
+let sessionsDir = stateDir.appendingPathComponent("sessions")
+func sessionFile(_ id: String) -> URL { sessionsDir.appendingPathComponent(id + ".json") }
+let SESSION_STALE_SECONDS: TimeInterval = 12 * 3600
 // Active sprite sheet — Codex pets ship a WebP, so .webp is preferred.
 let activeNames = ["active.webp", "active.png"]
 
@@ -67,7 +70,7 @@ func loadFrames() -> Frames {
     return Frames()
 }
 
-struct PetState: Codable { var state = "idle"; var detail: String? }
+struct PetState: Codable { var state = "idle"; var cwd: String?; var detail: String? }
 
 // MARK: - State model: Claude Code session state -> Codex animation row
 
@@ -185,6 +188,7 @@ final class PetView: NSView {
     var bubbleLabel: String?
     var bubbleDot: NSColor?
     var oneShotFallback: String?
+    var caption: String?   // project / session label (shown when set)
 
     private func anims() -> [String: [Int]] { cfg.animations ?? codexAnimations() }
 
@@ -235,6 +239,18 @@ final class PetView: NSView {
             drawPlaceholder(in: dest)
         }
         if let label = bubbleLabel { drawBubble(label, dot: bubbleDot, above: dest) }
+        if let cap = caption { drawCaption(cap) }
+    }
+
+    // Small dim project label (top of window) so pets from different sessions
+    // are distinguishable at a glance.
+    private func drawCaption(_ text: String) {
+        let font: NSFont = NSFont(name: "Menlo", size: 9) ?? NSFont.systemFont(ofSize: 9)
+        let s = text as NSString
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG.withAlphaComponent(0.7)]
+        let sz = s.size(withAttributes: attrs)
+        let x = min(max(2, (bounds.width - sz.width) / 2), bounds.width - sz.width - 2)
+        s.draw(at: NSPoint(x: x, y: bounds.height - sz.height - 2), withAttributes: attrs)
     }
 
     private func stateAccent() -> NSColor {
@@ -254,7 +270,7 @@ final class PetView: NSView {
 
     // Terminal-style status pill: dark bg, coral hairline border, mono label, status dot.
     private func drawBubble(_ label: String, dot: NSColor?, above rect: NSRect) {
-        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+        let font: NSFont = NSFont(name: "Menlo", size: 11) ?? NSFont.boldSystemFont(ofSize: 11)
         let text = label as NSString
         let tAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG]
         let tSize = text.size(withAttributes: tAttrs)
@@ -276,19 +292,49 @@ final class PetView: NSView {
     }
 }
 
-// MARK: - App (GUI overlay)
+// MARK: - App (one pet window per Claude Code session)
+
+// A single floating pet window bound to one session.
+final class PetWindow {
+    let window: NSWindow
+    let view: PetView
+    var appliedState = ""
+
+    init() {
+        view = PetView(frame: NSRect(x: 0, y: 0, width: 170, height: 210))
+        view.cfg = loadFrames()
+        view.sprite = loadActiveSprite()
+        window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.level = .statusBar
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+        window.isMovableByWindowBackground = true
+        window.contentView = view
+        window.orderFrontRegardless()
+    }
+
+    func reloadSprite() {
+        view.cfg = loadFrames()
+        view.sprite = loadActiveSprite()
+        view.needsDisplay = true
+    }
+
+    func place(_ origin: NSPoint) { window.setFrameOrigin(origin) }
+    func close() { window.orderOut(nil) }
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    var window: NSWindow!
-    var view: PetView!
-    var lastMTime: Date?
+    var pets: [String: PetWindow] = [:]   // sessionID -> window
+    var hidden = false
     var statusItem: NSStatusItem!
 
     func setupMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🐾"
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Show / Hide Pet", action: #selector(toggleVisibility), keyEquivalent: "p"))
+        menu.addItem(NSMenuItem(title: "Show / Hide Pets", action: #selector(toggleVisibility), keyEquivalent: "p"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Load Pet… (Codex .webp or folder)", action: #selector(loadSprite), keyEquivalent: "l"))
         menu.addItem(NSMenuItem(title: "Reset to Default Pet", action: #selector(resetSprite), keyEquivalent: ""))
@@ -298,7 +344,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func toggleVisibility() {
-        if window.isVisible { window.orderOut(nil) } else { window.orderFrontRegardless() }
+        hidden.toggle()
+        for (_, p) in pets { if hidden { p.close() } else { p.window.orderFrontRegardless() } }
     }
 
     @objc func loadSprite() {
@@ -316,79 +363,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var isDir: ObjCBool = false
         FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
         if isDir.boolValue {
-            // Codex pet folder: find the spritesheet inside.
             let candidates = ["spritesheet.webp", "spritesheet.png"]
             guard let found = candidates.map({ url.appendingPathComponent($0) })
                     .first(where: { FileManager.default.fileExists(atPath: $0.path) }) else { return }
             sheet = found
         }
         let ext = sheet.pathExtension.lowercased() == "png" ? "png" : "webp"
-        // Clear any previous active sprite, then install the new one.
         for name in activeNames { try? FileManager.default.removeItem(at: stateDir.appendingPathComponent(name)) }
-        let dest = stateDir.appendingPathComponent("active.\(ext)")
-        try? FileManager.default.copyItem(at: sheet, to: dest)
-        reloadSprite()
+        try? FileManager.default.copyItem(at: sheet, to: stateDir.appendingPathComponent("active.\(ext)"))
+        for (_, p) in pets { p.reloadSprite() }
     }
 
     @objc func resetSprite() {
         for name in activeNames { try? FileManager.default.removeItem(at: stateDir.appendingPathComponent(name)) }
-        reloadSprite()
-    }
-
-    func reloadSprite() {
-        view.cfg = loadFrames()
-        view.sprite = loadActiveSprite()
-        view.needsDisplay = true
+        for (_, p) in pets { p.reloadSprite() }
     }
 
     @objc func quit() { NSApp.terminate(nil) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: petsDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
         try? "\(getpid())".write(to: pidURL, atomically: true, encoding: .utf8)
-
-        view = PetView(frame: NSRect(x: 0, y: 0, width: 170, height: 210))
-        view.cfg = loadFrames()
-        view.sprite = loadActiveSprite()
-
-        window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = false
-        window.level = .statusBar
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-        window.isMovableByWindowBackground = true
-        window.contentView = view
-        if let screen = NSScreen.main {
-            let vf = screen.visibleFrame
-            window.setFrameOrigin(NSPoint(x: vf.maxX - 190, y: vf.minY + 28))
-        }
-        window.orderFrontRegardless()
         setupMenu()
-        applyState()
+        sync()
 
-        Timer.scheduledTimer(withTimeInterval: 1.0 / max(1.0, view.cfg.fps), repeats: true) { [weak self] _ in
-            self?.view.advance()
+        let fps = loadFrames().fps
+        Timer.scheduledTimer(withTimeInterval: 1.0 / max(1.0, fps), repeats: true) { [weak self] _ in
+            self?.pets.values.forEach { $0.view.advance() }
         }
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            self?.pollState()
+            self?.sync()
         }
     }
 
-    private func pollState() {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: stateFileURL.path)
-        let m = attrs?[.modificationDate] as? Date
-        if m != lastMTime { lastMTime = m; applyState() }
+    // Reconcile windows with the per-session state files on disk.
+    private func sync() {
+        let fm = FileManager.default
+        let files = (try? fm.contentsOfDirectory(at: sessionsDir, includingPropertiesForKeys: [.contentModificationDateKey]))?
+            .filter { $0.pathExtension == "json" } ?? []
+
+        var live: [String: PetState] = [:]
+        for f in files {
+            let id = f.deletingPathExtension().lastPathComponent
+            // Prune crashed/stale sessions that never sent SessionEnd.
+            if let attrs = try? fm.attributesOfItem(atPath: f.path),
+               let m = attrs[.modificationDate] as? Date, -m.timeIntervalSinceNow > SESSION_STALE_SECONDS {
+                try? fm.removeItem(at: f); continue
+            }
+            if let data = try? Data(contentsOf: f),
+               let st = try? JSONDecoder().decode(PetState.self, from: data) { live[id] = st }
+        }
+
+        // Remove pets whose session ended/disappeared.
+        for id in pets.keys where live[id] == nil { pets[id]?.close(); pets[id] = nil }
+
+        // Add/refresh pets for live sessions.
+        var changed = false
+        for (id, st) in live {
+            let pet: PetWindow
+            if let existing = pets[id] { pet = existing }
+            else { pet = PetWindow(); pets[id] = pet; changed = true; if hidden { pet.close() } }
+            // Show the project label only when more than one session is active.
+            let cap = live.count > 1 ? st.cwd.map { URL(fileURLWithPath: $0).lastPathComponent } : nil
+            if pet.view.caption != cap { pet.view.caption = cap; pet.view.needsDisplay = true }
+            if pet.appliedState != st.state {          // only apply on change (preserve one-shots)
+                pet.appliedState = st.state
+                pet.view.setState(st.state)
+                if !hidden { pet.window.orderFrontRegardless() }
+            }
+        }
+        if changed { relayout() }
     }
 
-    private func applyState() {
-        var s = PetState()
-        if let data = try? Data(contentsOf: stateFileURL),
-           let decoded = try? JSONDecoder().decode(PetState.self, from: data) { s = decoded }
-        if s.state == "off" { window.orderOut(nil); return }
-        view.setState(s.state)
-        if !window.isVisible { window.orderFrontRegardless() }
+    // Lay pets out along the bottom-right, marching left as more appear.
+    private func relayout() {
+        guard let vf = NSScreen.main?.visibleFrame else { return }
+        for (i, id) in pets.keys.sorted().enumerated() {
+            pets[id]?.place(NSPoint(x: vf.maxX - 190 - CGFloat(i) * 160, y: vf.minY + 28))
+        }
     }
 }
 
@@ -410,9 +463,47 @@ let HOOK_WIRING: [(event: String, state: String, matcher: Bool)] = [
 
 func selfExecPath() -> String { Bundle.main.executablePath ?? CommandLine.arguments[0] }
 
+// Claude Code delivers event JSON on stdin. Read it WITHOUT blocking when no
+// data is piped (manual runs), via a zero-timeout poll.
+func readHookInput() -> (session: String, cwd: String?) {
+    var session = "default"; var cwd: String? = nil
+    var fds = pollfd(fd: 0, events: Int16(POLLIN), revents: 0)
+    if poll(&fds, 1, 0) > 0, (fds.revents & Int16(POLLIN)) != 0 {
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let s = obj["session_id"] as? String, !s.isEmpty { session = s }
+            cwd = obj["cwd"] as? String
+        }
+    }
+    return (session, cwd)
+}
+
 func writeState(_ state: String) {
+    try? FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
+    let info = readHookInput()
+    let file = sessionFile(info.session)
+    if state == "off" {
+        try? FileManager.default.removeItem(at: file)   // session ended -> remove its pet
+        return
+    }
+    var obj: [String: Any] = ["state": state]
+    if let c = info.cwd { obj["cwd"] = c }
+    if let data = try? JSONSerialization.data(withJSONObject: obj) {
+        try? data.write(to: file)
+    }
+}
+
+// Hard single-instance guarantee for the GUI: hold an exclusive advisory lock
+// for the process lifetime. Races where several --state calls each spawn a GUI
+// resolve cleanly — only the lock holder survives, the rest exit immediately.
+var singletonLockFD: Int32 = -1
+func acquireSingletonOrExit() {
     try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
-    try? "{\"state\":\"\(state)\"}\n".write(to: stateFileURL, atomically: true, encoding: .utf8)
+    let lockPath = stateDir.appendingPathComponent("pet.lock").path
+    singletonLockFD = open(lockPath, O_CREAT | O_RDWR, 0o644)
+    if singletonLockFD >= 0, flock(singletonLockFD, LOCK_EX | LOCK_NB) != 0 {
+        exit(0)   // another GUI already owns the overlay
+    }
 }
 
 func guiAlive() -> Bool {
@@ -547,6 +638,7 @@ if args.count >= 2 {
     }
 }
 
+acquireSingletonOrExit()   // only one overlay process survives
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

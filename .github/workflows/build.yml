@@ -21,12 +21,17 @@ jobs:
 
       - name: Smoke test (CLI paths, no GUI)
         run: |
-          .build/release/ClaudePet --state running
-          test -f "$HOME/.claude-pet/state.json"
-          grep -q running "$HOME/.claude-pet/state.json"
-          .build/release/ClaudePet --install-hooks
+          .build/release/ClaudePet --state running < /dev/null
+          test -f "$HOME/.claude-pet/sessions/default.json"
+          grep -q running "$HOME/.claude-pet/sessions/default.json"
+          # per-session routing
+          echo '{"session_id":"ci","cwd":"/tmp/proj"}' | .build/release/ClaudePet --state waiting
+          test -f "$HOME/.claude-pet/sessions/ci.json"
+          echo '{"session_id":"ci"}' | .build/release/ClaudePet --state off
+          test ! -f "$HOME/.claude-pet/sessions/ci.json"
+          .build/release/ClaudePet --install-hooks < /dev/null
           test -f "$HOME/.claude/settings.json"
-          .build/release/ClaudePet --uninstall-hooks
+          .build/release/ClaudePet --uninstall-hooks < /dev/null
 
       - name: Package app
         run: bash scripts/make-app.sh "${GITHUB_REF_NAME#v}"

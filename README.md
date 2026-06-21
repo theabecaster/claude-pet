@@ -45,9 +45,17 @@ Every Codex state is wired to a real Claude Code hook:
 | `failed`        | `StopFailure`           | the turn errored               | `● error`   |
 | `idle`          | (after `waving`)        | at rest                        | —           |
 
-State is written to `~/.claude-pet/state.json` by the hooks; the overlay watches
-it and animates. `waving` and `jumping` are one-shots that settle into `idle`
-and `review`. No polling of Claude, no network.
+Each hook writes `~/.claude-pet/sessions/<session_id>.json`; the overlay watches
+the folder and animates. `waving` and `jumping` are one-shots that settle into
+`idle` and `review`. No polling of Claude, no network.
+
+## Multiple sessions
+
+Run several Claude Code sessions at once and you get **one pet per session**,
+arranged along the bottom-right and labeled with each project name. A pet appears
+when its session starts, tracks that session's state independently, and
+disappears when the session ends (stale sessions are pruned automatically). A
+single session shows a single, unlabeled pet.
 
 ## Install
 
