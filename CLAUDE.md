@@ -101,6 +101,12 @@ entirely in code** (no third-party art; also used for the app icon). Sheet layou
 come from `Frames` (defaults overridable via `~/.claude-pet/frames.json`; see
 `frames.json.example`). The status pill and session caption stack upward above the pet.
 
+The code-drawn **attention effects** (`motion()`'s bob/shake + the pulsing halo) are gated to
+the built-in mascot only: `draw()` uses `sprite == nil ? motion() : (0,0,0)`, so a **custom
+sprite renders flat** and animates purely from its own per-state frames — preserving the look
+its author intended in every state. The default mascot keeps its full attention-budget motion.
+(The status pill/caption are informational chrome and render for both.)
+
 The **menu-bar icon** is a tiny version of the same pet (`menuBarImage()`), reflecting the
 selected session's state so the app stays usable when the overlay is hidden. It's colored by
 state (`accentFor`) rather than a dark template — a custom sprite blits its first frame for the

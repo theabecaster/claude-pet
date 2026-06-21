@@ -57,6 +57,10 @@ When it **needs you** it gets your attention — a gentle bob and a pulsing halo
 then settles down again once handled. `ready` gives a soft positive nudge,
 `error` a small shake. Calm while you work; loud only when it matters.
 
+These code-drawn effects (bob, shake, halo) belong to the **built-in mascot**. A
+**custom sprite** renders flat and animates purely from its own frames, so it keeps
+exactly the look and motion its author designed in every state.
+
 ## Lives in your menu bar too
 
 The menu-bar icon is a **tiny version of your pet**, colored by the selected

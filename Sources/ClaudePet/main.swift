@@ -348,7 +348,11 @@ final class PetView: NSView {
         let scale = CGFloat(cfg.scale)
         let drawW = fw * scale, drawH = fh * scale
         let baseX = (bounds.width - drawW) / 2, baseY: CGFloat = 12
-        let m = motion()
+        // Code-drawn motion (bob/shake) and the attention halo are part of the
+        // built-in mascot's "attention budget" look. A custom sprite ships its own
+        // per-state animation, so we render it flat — no bob, no shake, no halo —
+        // and let the sprite's own frames carry the context and look its author intended.
+        let m = sprite == nil ? motion() : (dx: CGFloat(0), dy: CGFloat(0), ring: CGFloat(0))
         let dest = NSRect(x: baseX + m.dx, y: baseY + m.dy, width: drawW, height: drawH)
 
         if m.ring > 0 {                                        // pulsing attention halo
