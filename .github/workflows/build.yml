@@ -1,11 +1,27 @@
 name: build
 
+# Two roles:
+#   - CI: builds + self-test + smoke on every PR (to main/dev) and push to dev.
+#         The `build` job is the required status check for merging.
+#   - Release engine: called by release.yml (workflow_call) with release=true to
+#         package, sign, notarize, tag and publish a GitHub Release at a version.
+# Pushes to `main` are handled by release.yml (which calls this), so `main` is not
+# a push trigger here — that avoids a duplicate build on every merge.
 on:
   push:
-    branches: [main, dev]
-    tags: ['v*']
+    branches: [dev]
   pull_request:
     branches: [main, dev]
+  workflow_call:
+    inputs:
+      release:
+        description: "Package, sign, notarize, tag and publish a release"
+        type: boolean
+        default: false
+      version:
+        description: "Release version X.Y.Z (no leading v); required when release=true"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -14,7 +30,7 @@ jobs:
   build:
     runs-on: macos-14
     # Exposed for the `if:` gates below so signing/notarization is skipped on PRs
-    # and forks (where secrets are empty) and only runs on tagged releases.
+    # and forks (where secrets are empty) and only runs on real releases.
     env:
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
     steps:
@@ -41,7 +57,7 @@ jobs:
           .build/release/ClaudePet --uninstall-hooks < /dev/null
 
       - name: Import Developer ID certificate
-        if: startsWith(github.ref, 'refs/tags/') && env.MACOS_CERTIFICATE != ''
+        if: ${{ inputs.release && env.MACOS_CERTIFICATE != '' }}
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
@@ -60,10 +76,11 @@ jobs:
           echo "CODESIGN_IDENTITY=$IDENT" >> "$GITHUB_ENV"
 
       - name: Package app
-        run: bash scripts/make-app.sh "${GITHUB_REF_NAME#v}"
+        if: ${{ inputs.release }}
+        run: bash scripts/make-app.sh "${{ inputs.version }}"
 
       - name: Notarize and staple
-        if: startsWith(github.ref, 'refs/tags/') && env.MACOS_CERTIFICATE != ''
+        if: ${{ inputs.release && env.MACOS_CERTIFICATE != '' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -76,18 +93,21 @@ jobs:
           spctl -a -vvv -t exec "dist/ClaudePet.app"   # must now report: accepted, source=Notarized Developer ID
 
       - name: Zip release bundle
+        if: ${{ inputs.release }}
         run: |
           cd dist
           zip -r ../ClaudePet-macos.zip "ClaudePet.app"   # app only; it self-installs/uninstalls (no gated scripts)
 
       - uses: actions/upload-artifact@v4
+        if: ${{ inputs.release }}
         with:
           name: ClaudePet-macos
           path: ClaudePet-macos.zip
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: ${{ inputs.release }}
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ inputs.version }}
           files: ClaudePet-macos.zip
           generate_release_notes: true

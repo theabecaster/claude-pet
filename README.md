@@ -163,8 +163,10 @@ macOS 12+ (WebP decoding is built in). Swift / AppKit, no runtime deps.
 
 ## Contributing
 
-Forks, issues, and PRs welcome — open PRs against `dev`. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Forks, issues, and PRs welcome — open PRs against `dev`. Both `main` and `dev`
+are protected (PR + green CI required), and use [Conventional Commits](https://www.conventionalcommits.org)
+so releases version themselves: merging to `main` auto-builds and publishes a
+GitHub Release. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

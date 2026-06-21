@@ -25,6 +25,8 @@ swift build -c release                                  # build (the only build 
 ./install.sh                                            # build + wire hooks (dev install)
 bash scripts/make-app.sh 1.0.0                          # package dist/ClaudePet.app + installers
 ./load-pet.sh /path/to/spritesheet.webp                 # swap in a custom sprite
+bash scripts/next-version.sh                            # preview next auto-release version from commits
+bash scripts/setup-branch-protection.sh                 # (re)apply main/dev branch-protection rulesets
 ```
 
 There is no unit-test suite. CI (`.github/workflows/build.yml`) is the de-facto test: it
@@ -149,11 +151,18 @@ Two deliberate guards (do not "simplify" them away):
 
 ## Conventions
 
-- Branches: `main` is stable/released; `dev` mirrors it. **External contributors open PRs
-  against `dev`** (per CONTRIBUTING.md). For solo/direct work we commit to `main` and
-  fast-forward `dev` to match (see procedure below).
-- **Commit messages: clean and professional, NO AI attribution** — never mention Claude /
-  Anthropic / "Generated with…" / "Co-Authored-By: Claude". (Global user rule.)
+- Branches: `main` is stable/released; `dev` is the integration branch the maintainer works
+  on day-to-day. **External contributors open PRs against `dev`** (per CONTRIBUTING.md). Both
+  branches are protected by **GitHub rulesets** (`gh api repos/:owner/:repo/rulesets`): direct
+  pushes are blocked, changes need a PR, the `build` CI check must pass, and force-push +
+  deletion are blocked. The maintainer (repo **admin**) has an `always` bypass on both, so they
+  can still push directly; everyone else must PR (collaborators) or fork+PR (outside). To edit
+  the rules: `gh api repos/theabecaster/claude-pet/rulesets/<id>` (GET to inspect, PUT to update,
+  DELETE to remove).
+- **Commit messages: Conventional Commits** (`feat:`/`fix:`/`feat!:`/`docs:`/`chore:`…) — the
+  release version is derived from them (see below). Still **clean and professional, NO AI
+  attribution** — never mention Claude / Anthropic / "Generated with…" / "Co-Authored-By:
+  Claude". (Global user rule.)
 - License is PolyForm Noncommercial — keep any bundled/added art noncommercial-clean (the
   mascot/icon are drawn in code on purpose; never commit third-party sprites).
 
@@ -162,32 +171,51 @@ Two deliberate guards (do not "simplify" them away):
 We ship a single distributable: the prebuilt, signed + notarized **`ClaudePet.app`** alone,
 zipped as `ClaudePet-macos.zip` and attached to a GitHub Release. **No `.command` installer
 scripts** — a downloaded script is always quarantine-gated, so the app installs and uninstalls
-itself instead (see below). Versioning is **semver** via `vX.Y.Z` git tags (patch =
-fix/docs-with-build, minor = user-facing feature, major = breaking). The version passed to
-`make-app.sh` becomes the bundle's `CFBundleShortVersionString`.
+itself instead (see below). Versioning is **semver**, **derived automatically from Conventional
+Commit messages** — there is no manual tagging in the normal flow. The computed version becomes
+the `vX.Y.Z` tag and the bundle's `CFBundleShortVersionString`.
 
-### Cut a release (the standard flow)
+### How releasing works (automatic)
 
-1. **Make the change.** Build must be warning-free; run the gates locally:
+Two workflows, one engine:
+- **`build.yml`** — the reusable build engine + CI. Runs `swift build`, `--selftest`, and the
+  CLI smoke tests on every PR (to `main`/`dev`) and push to `dev`; its `build` job is the
+  required status check. Also exposes `workflow_call(release, version)` — when `release: true`
+  it additionally packages, signs, notarizes, tags `vX.Y.Z`, and publishes the GitHub Release.
+- **`release.yml`** — fires on **push to `main`** (a PR merge or a maintainer push). Its
+  `version` job runs `scripts/next-version.sh` to compute the bump from Conventional Commits
+  since the last tag, then calls `build.yml` with `release: true` only if there's something to
+  ship. (`main` is intentionally **not** a `push` trigger in `build.yml`, so a merge builds
+  once, not twice.)
+
+**Version rules** (`scripts/next-version.sh`, runnable locally to preview):
+- `fix:`/`perf:` → patch · `feat:` → minor · `feat!:` or `BREAKING CHANGE:` → major
+- `docs:`/`chore:`/`ci:`/`refactor:`/`test:`-only, or **`[skip release]`** in the tip commit
+  → **no release** (this replaces the old "docs-only = no tag" rule).
+
+So the **standard flow is just**: land Conventional-Commit-prefixed work on `main` (PR from
+`dev`, or a direct maintainer push). Everything below happens automatically.
+
+1. **Before merging**, the gates run in CI but mirror them locally when iterating:
    ```bash
    swift build -c release 2>&1 | grep -i warning   # must be empty
    .build/release/ClaudePet --selftest             # interaction gate (exit 0)
+   bash scripts/next-version.sh                     # preview release=<bool> version=X.Y.Z
    ```
 2. **Keep docs in sync in the SAME change** (see "Docs to update" below). Regenerate any
    affected screenshots with `--render <state> docs/pet_<state>.png`, `--render-stack
    docs/stack.png`, and the icon with `make-icon.sh`.
-3. **Package the app:** `bash scripts/make-app.sh X.Y.Z` → `dist/ClaudePet.app` + installers.
-   The script **code-signs** the bundle and runs `codesign --verify` (a hard gate). This is
-   required: the Swift linker leaves the bundle with a partial, inconsistent signature (no
-   `CodeResources`), and a quarantined app in that state is what macOS reports as "damaged —
-   move to Trash". Locally (no `$CODESIGN_IDENTITY`) it signs **ad-hoc**, which downgrades that
-   fatal verdict to the recoverable "unidentified developer → Open Anyway". On a tagged CI
-   build with the Developer ID secrets present (below), it signs with the real identity +
+3. **The release job** (inside `build.yml`, triggered by `release.yml`) runs
+   `bash scripts/make-app.sh <version>` → `dist/ClaudePet.app`. The script **code-signs** the
+   bundle and runs `codesign --verify` (a hard gate): the Swift linker leaves a partial,
+   inconsistent signature (no `CodeResources`), which a quarantined app reports as "damaged —
+   move to Trash". With the Developer ID secrets present it signs with the real identity +
    hardened runtime + secure timestamp, then **notarizes and staples** — removing the Gatekeeper
-   prompt entirely.
+   prompt entirely. (Locally / without secrets, `make-app.sh` signs **ad-hoc**, downgrading the
+   fatal verdict to the recoverable "unidentified developer → Open Anyway".)
 
    **Notarization secrets** (GitHub repo → Settings → Secrets and variables → Actions). When
-   absent (PRs, forks, untagged builds) CI falls back to ad-hoc and still passes:
+   absent (PRs, forks) CI falls back to ad-hoc and still passes:
    - `MACOS_CERTIFICATE` — base64 of the exported **Developer ID Application** cert `.p12`
      (`base64 -i cert.p12 | pbcopy`).
    - `MACOS_CERTIFICATE_PWD` — the password set when exporting the `.p12`.
@@ -196,30 +224,33 @@ fix/docs-with-build, minor = user-facing feature, major = breaking). The version
    - `APPLE_TEAM_ID` — 10-char Team ID (Apple Developer → Membership).
    - `APPLE_APP_PASSWORD` — an **app-specific password** (appleid.apple.com → Sign-In & Security),
      not the account password.
-4. **(Optional) dogfood locally** — reinstall the running copy without it hanging:
-   ```bash
-   pkill -x ClaudePet; sleep 1; pkill -9 -x ClaudePet
-   rm -f ~/.claude-pet/pet.lock ~/.claude-pet/pet.pid
-   rm -rf /Applications/ClaudePet.app && cp -R dist/ClaudePet.app /Applications/ClaudePet.app
-   /Applications/ClaudePet.app/Contents/MacOS/ClaudePet --install-hooks < /dev/null
-   ```
-5. **Commit + push `main`, fast-forward `dev`** (clean message, no AI attribution):
-   ```bash
-   git add -A && git commit -m "..."
-   git push origin main
-   git branch -f dev main && git push origin dev
-   ```
-6. **Tag → triggers the release build:**
-   ```bash
-   git tag vX.Y.Z && git push origin vX.Y.Z
-   ```
-   CI builds, runs `--selftest` + smoke, packages the zip, and publishes the GitHub Release
-   (the workflow has `permissions: contents: write`; without it the release step 403s).
-7. **Verify:** `gh run list --branch vX.Y.Z` shows success, and
+4. **Verify after merge:** `gh run list --workflow release.yml -L 3` shows success, and
    `gh release view vX.Y.Z` lists `ClaudePet-macos.zip`.
 
-**Docs-only change** (e.g. a screenshot): commit + push `main`, fast-forward `dev`, **no tag**
-(no need to cut a release).
+**Manual escape hatches** (rarely needed):
+- Force a specific version: `gh workflow run release.yml -f version=X.Y.Z` (or Actions tab →
+  release → Run workflow).
+- Push a tag: `git tag vX.Y.Z && git push origin vX.Y.Z` — `release.yml`'s tag trigger picks
+  it up and publishes. (Tags created by CI's `GITHUB_TOKEN` don't re-trigger workflows, so the
+  auto-flow never loops.)
+
+**(Optional) dogfood locally** — reinstall the running copy without it hanging:
+```bash
+bash scripts/make-app.sh "$(bash scripts/next-version.sh | sed -n 's/^version=//p')"
+pkill -x ClaudePet; sleep 1; pkill -9 -x ClaudePet
+rm -f ~/.claude-pet/pet.lock ~/.claude-pet/pet.pid
+rm -rf /Applications/ClaudePet.app && cp -R dist/ClaudePet.app /Applications/ClaudePet.app
+/Applications/ClaudePet.app/Contents/MacOS/ClaudePet --install-hooks < /dev/null
+```
+
+### Branch protection (rulesets)
+
+`main` and `dev` each have a ruleset requiring a PR, the `build` status check, and blocking
+force-push + deletion — with an `always` **bypass for the repo admin role** so the maintainer
+can push directly. They are defined and re-applied by **`scripts/setup-branch-protection.sh`**
+(idempotent; re-run it after changing the rules, or set `REQUIRED_APPROVALS=1` to force review on
+collaborator PRs). To inspect/modify by hand: `gh api repos/theabecaster/claude-pet/rulesets`
+(list), `…/rulesets/<id>` (GET/PUT/DELETE).
 
 ### Keeping README & CLAUDE.md current (do this as things change)
 
