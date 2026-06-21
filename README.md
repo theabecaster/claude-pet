@@ -49,16 +49,36 @@ Each hook writes `~/.claude-pet/sessions/<session_id>.json`; the overlay watches
 the folder and animates. `waving` and `jumping` are one-shots that settle into
 `idle` and `review`. No polling of Claude, no network.
 
-## Multiple sessions
+## Calm by design
 
-Run several Claude Code sessions at once and you get **one pet per session**,
-arranged along the bottom-right. Each pet is labeled with that session's
-**AI-generated title** (the same name Claude Code shows in its session list,
-read from the transcript) — e.g. *“Validate race prediction methodology”* —
-falling back to the project folder name. A pet appears when its session starts,
-tracks that session's state independently, and disappears when the session ends
-(stale sessions are pruned automatically). A new session with no title yet, when
-it's the only one, shows a clean unlabeled pet.
+The animation follows an **attention budget**: when Claude is *working*, the pet
+stays still and just looks busy (a slow typing cursor) so it never distracts you.
+When it **needs you** it gets your attention — a gentle bob and a pulsing halo —
+then settles down again once handled. `ready` gives a soft positive nudge,
+`error` a small shake. Calm while you work; loud only when it matters.
+
+## Multiple sessions — one tidy stack
+
+Run several Claude Code sessions at once and you get **one cohesive stack**, not a
+mess of windows. The **most relevant session** is the prominent pet in the
+corner; the rest sit in a clean list above it:
+
+- Auto-sorted by what needs you: **needs-input → error → ready → working → idle**.
+  When any session finishes or needs input, it rises to become the featured pet.
+- Each row shows the session's **AI-generated title** (the same name Claude Code
+  shows in its session list, read from the transcript; falls back to the project
+  folder) and a color-coded status.
+
+**Go through the stack** to feature whichever you want:
+
+- **Scroll** over the widget to flip through sessions.
+- **Click a row** to jump straight to that session.
+- **Click the pet** to release back to auto (a small *pinned* label shows when
+  you're holding a choice).
+
+Pets appear when sessions start and disappear when they end (stale ones are
+pruned). A single session is just one clean, unlabeled pet. Drag the widget
+anywhere; it stays put.
 
 ## Install
 
