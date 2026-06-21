@@ -78,7 +78,7 @@ jobs:
       - name: Zip release bundle
         run: |
           cd dist
-          zip -r ../ClaudePet-macos.zip "ClaudePet.app" "Install Claude Pet.command" "Uninstall Claude Pet.command"
+          zip -r ../ClaudePet-macos.zip "ClaudePet.app"   # app only; it self-installs/uninstalls (no gated scripts)
 
       - uses: actions/upload-artifact@v4
         with:

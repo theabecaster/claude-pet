@@ -621,6 +621,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Load Pet… (Codex .webp or folder)", action: #selector(loadSprite), keyEquivalent: "l"))
         menu.addItem(NSMenuItem(title: "Reset to Default Pet", action: #selector(resetSprite), keyEquivalent: ""))
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Reinstall Claude Code Hooks", action: #selector(reinstallHooks), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Uninstall Claude Pet…", action: #selector(uninstallSelf), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit Claude Pet", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
     }
@@ -670,12 +672,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stack.primary.cfg = loadFrames(); stack.primary.sprite = loadActiveSprite(); stack.primary.needsDisplay = true
         menuIconKey = ""; updateMenuBarIcon(stack.primary.anim)   // re-render the menu bar from the new sprite
     }
+    @objc func reinstallHooks() {
+        installHooks()
+        let a = NSAlert()
+        a.messageText = "Claude Code hooks installed"
+        a.informativeText = "Wired \(HOOK_WIRING.count) events into ~/.claude/settings.json.\nRestart Claude Code for the pet to react."
+        a.addButton(withTitle: "OK")
+        a.runModal()
+    }
+    // Self-uninstall so removal never depends on a quarantine-gated script either:
+    // unwire the hooks, delete the app's state, then remove the app bundle and quit.
+    @objc func uninstallSelf() {
+        let a = NSAlert()
+        a.messageText = "Uninstall Claude Pet?"
+        a.informativeText = "This removes the Claude Code hooks, this app, and ~/.claude-pet (your saved layout and sprites). Your other Claude Code settings are left untouched."
+        a.addButton(withTitle: "Uninstall")
+        a.addButton(withTitle: "Cancel")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        uninstallHooks()
+        try? FileManager.default.removeItem(at: stateDir)
+        try? FileManager.default.removeItem(at: Bundle.main.bundleURL)   // best-effort (no-op if translocated)
+        NSApp.terminate(nil)
+    }
     @objc func quit() { NSApp.terminate(nil) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         try? FileManager.default.createDirectory(at: petsDir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
         try? "\(getpid())".write(to: pidURL, atomically: true, encoding: .utf8)
+        // The app is its own installer: wire the Claude Code hooks on first launch
+        // (and re-wire if the app was moved, since the hook stores an absolute path).
+        // Lets users just open the notarized .app — no quarantine-gated installer script.
+        if !hooksPointToSelf() { installHooks() }
         setupMenu()
 
         stack = StackView(frame: NSRect(x: 0, y: 0, width: 232, height: 200))
@@ -891,6 +919,26 @@ func installHooks() {
         try? out.write(to: settingsURL)
         print("🐾 Claude Pet hooks installed (\(HOOK_WIRING.count) events) → \(settingsURL.path)")
     }
+}
+
+// True only when settings.json already has a Claude Pet --state hook whose command
+// points at THIS running binary. Used by the GUI to self-wire on first launch and
+// self-heal if the app was moved (the hook stores an absolute exe path). This makes
+// the notarized .app a complete installer, so the download flow never depends on a
+// quarantine-gated .command script.
+func hooksPointToSelf() -> Bool {
+    guard let d = try? Data(contentsOf: settingsURL),
+          let root = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+          let hooks = root["hooks"] as? [String: Any] else { return false }
+    let exe = selfExecPath()
+    for (_, v) in hooks {
+        for g in (v as? [[String: Any]]) ?? [] {
+            for c in (g["hooks"] as? [[String: Any]]) ?? [] {
+                if let cmd = c["command"] as? String, cmd.contains("--state"), cmd.contains(exe) { return true }
+            }
+        }
+    }
+    return false
 }
 
 func uninstallHooks() {

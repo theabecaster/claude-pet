@@ -155,11 +155,12 @@ Two deliberate guards (do not "simplify" them away):
 
 ## Release & maintenance procedures
 
-We ship a single distributable: a prebuilt **`ClaudePet.app`** plus double-click
-`Install/Uninstall .command` scripts, zipped as `ClaudePet-macos.zip` and attached to a
-GitHub Release. Versioning is **semver** via `vX.Y.Z` git tags (patch = fix/docs-with-build,
-minor = user-facing feature, major = breaking). The version passed to `make-app.sh` becomes
-the bundle's `CFBundleShortVersionString`.
+We ship a single distributable: the prebuilt, signed + notarized **`ClaudePet.app`** alone,
+zipped as `ClaudePet-macos.zip` and attached to a GitHub Release. **No `.command` installer
+scripts** — a downloaded script is always quarantine-gated, so the app installs and uninstalls
+itself instead (see below). Versioning is **semver** via `vX.Y.Z` git tags (patch =
+fix/docs-with-build, minor = user-facing feature, major = breaking). The version passed to
+`make-app.sh` becomes the bundle's `CFBundleShortVersionString`.
 
 ### Cut a release (the standard flow)
 
@@ -235,11 +236,14 @@ story; CLAUDE.md is the contributor/agent map — don't let either drift.
 
 ### Non-technical install (what the release zip delivers)
 
-`Install Claude Pet.command` stops any running copy (kill + wait), copies the app to
-`/Applications`, clears the Gatekeeper quarantine flag, and runs `--install-hooks` (append-only
-into `~/.claude/settings.json`). Released builds are **signed with a Developer ID and notarized**
-(when the CI secrets are configured), so they launch with no Gatekeeper prompt. If a build ever
-ships only ad-hoc-signed (secrets missing), launching *outside* the installer hits the
+The zip contains **only the notarized `ClaudePet.app`** — drag to `/Applications`, open. Released
+builds are **signed with a Developer ID and notarized** (when the CI secrets are configured), so
+they launch with no Gatekeeper prompt. **The app is its own installer**: on launch the GUI calls
+`hooksPointToSelf()` and runs `installHooks()` if the hooks are missing or point at a different
+path (so moving the app self-heals the absolute hook path). The **✳ menu** exposes *Reinstall
+Claude Code Hooks* (`reinstallHooks`) and *Uninstall Claude Pet…* (`uninstallSelf` — unwires
+hooks, deletes `~/.claude-pet`, removes the bundle, quits). We deliberately ship **no `.command`
+scripts**: a downloaded script is always quarantine-gated, which defeated the old installer. If a
+build ever ships only ad-hoc-signed (secrets missing), the app still launches but hits the
 recoverable "unidentified developer → Open Anyway" prompt — not the fatal "damaged — move to
-Trash" of an unsigned/partially-signed bundle. README's install section steers users to the
-installer and documents the `xattr -dr com.apple.quarantine` escape hatch either way.
+Trash" of an unsigned/partially-signed bundle; `xattr -dr com.apple.quarantine <app>` clears it.

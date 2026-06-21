@@ -98,20 +98,14 @@ pruned). A **single session** is just the one pet with its name shown beneath.
 ### Easy (no terminal — for everyone)
 
 1. Download `ClaudePet-macos.zip` from the [latest release](../../releases/latest).
-2. Unzip, then **run `Install Claude Pet.command`** — don't double-click `ClaudePet.app`
-   directly. The installer copies the app to `/Applications`, clears the download
-   quarantine, and wires the hooks for you.
-   - First run macOS asks to confirm a downloaded script: **right-click → Open → Open**.
+2. Unzip, drag **`ClaudePet.app`** to your **Applications** folder, and **open it**.
+   The app is signed and notarized, so it opens with no Gatekeeper prompt — and it
+   **wires the Claude Code hooks itself** on first launch.
 3. Restart Claude Code. Your pet appears and reacts.
 
-Control it from the **✳ menu-bar icon**: show/hide, load a pet, reset to default.
-
-> **“ClaudePet.app is damaged / can’t be opened”?** That’s macOS Gatekeeper, not a
-> broken download. Run **`Install Claude Pet.command`** (it clears the flag for you),
-> or clear it manually:
-> ```bash
-> xattr -dr com.apple.quarantine /path/to/ClaudePet.app
-> ```
+Control it from the **✳ menu-bar icon**: show/hide, load a pet, reset to default,
+reinstall hooks, or uninstall. (No installer scripts — the app installs and removes
+itself, so there's never a quarantine-gated `.command` to fight.)
 
 ### One-click (for technical friends)
 
@@ -151,7 +145,8 @@ idempotently**.
 
 ## Uninstall
 
-Double-click **`Uninstall Claude Pet.command`**, or:
+**✳ menu → Uninstall Claude Pet…** — removes the hooks, the app, and `~/.claude-pet`
+(your other Claude Code settings are left untouched). Or from a terminal:
 
 ```bash
 .build/release/ClaudePet --uninstall-hooks

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Source install (for developers / people with Xcode CLT).
-# Non-technical users: download the prebuilt app from GitHub Releases and run
-# "Install Claude Pet.command" instead — no compiler needed.
+# Non-technical users: download the prebuilt app from GitHub Releases, drag it to
+# /Applications and open it — it wires its own hooks. No compiler needed.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

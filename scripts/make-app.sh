@@ -69,8 +69,8 @@ else
   echo "!! codesign not found — bundle will be unsigned (Gatekeeper will mark it damaged)" >&2
 fi
 
-cp "scripts/Install Claude Pet.command" dist/
-cp "scripts/Uninstall Claude Pet.command" dist/
-chmod +x dist/*.command
-
 echo "==> Built $APP (v$VERSION)"
+# Note: no .command installers are staged. A downloaded shell script is always
+# quarantined and Gatekeeper-gated, so the app self-installs its hooks on launch
+# and self-uninstalls from the menu instead. The release ships the notarized app
+# alone — drag to /Applications and open.
