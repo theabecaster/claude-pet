@@ -47,7 +47,8 @@ Every Codex state is wired to a real Claude Code hook:
 
 Each hook writes `~/.claude-pet/sessions/<session_id>.json`; the overlay watches
 the folder and animates. `waving` and `jumping` are one-shots that settle into
-`idle` and `review`. No polling of Claude, no network.
+`idle` and `review`. No polling of Claude, no network. (The `working` pill gets
+more specific in practice — see [below](#tells-you-whats-actually-happening).)
 
 ## Calm by design
 
@@ -60,6 +61,43 @@ then settles down again once handled. `ready` gives a soft positive nudge,
 These code-drawn effects (bob, shake, halo) belong to the **built-in mascot**. A
 **custom sprite** renders flat and animates purely from its own frames, so it keeps
 exactly the look and motion its author designed in every state.
+
+## Tells you what's actually happening
+
+The pet doesn't just show *that* Claude is busy — it shows **what it's doing** and
+**why it stopped**, pulled straight from the data Claude Code hands its hooks and
+writes to the transcript:
+
+- **The status pill names the activity.** Instead of a generic "working", it says
+  `editing`, `reading`, `running`, `searching`, `browsing`, `delegating`,
+  `planning` — derived from the tool Claude is using. When it **needs you**, the
+  pill shows the actual reason ("permission: run Bash"); when it **errors**, the
+  real cause ("rate limited", "overloaded", "billing issue").
+- **Time-in-state.** A compact `· 12s` / `· 3m` tells you how long it's been
+  working on this step or waiting for you.
+- **A live session readout.** Under the name: the **model** (`opus 4.8`), the
+  **context size** so far (`43k ctx` — handy for spotting an approaching
+  auto-compact), and the **git branch** (`main`). All read cheaply from the tail
+  of the session transcript.
+
+## Get a nudge when it needs you
+
+When a session crosses into **needs you** or **errors**, Claude Pet can **chime**
+and **bounce** to get your attention — even if the overlay is behind other windows.
+Both are independent toggles in the **✳ menu** (with a master **Mute All Alerts**),
+and they only fire on the *transition*, so a session that's already waiting when you
+launch won't spam you.
+
+## Make it yours
+
+- **Themes.** **✳ → Theme** switches the whole widget between **Claude** (the coral
+  default), **Midnight**, **Grove**, and **Mono** — pill, list, pet, and menu-bar
+  icon all recolor instantly. Your pick is remembered.
+- **Pet the pet.** Tap the big pet and it does a happy little hop, then settles
+  back into whatever it was doing. Purely for joy.
+
+Every preference (theme, alerts, info toggles) is saved to
+`~/.claude-pet/prefs.json` and restored on launch.
 
 ## Lives in your menu bar too
 
@@ -103,8 +141,9 @@ pruned). A **single session** is just the one pet with its name shown beneath.
    **wires the Claude Code hooks itself** on first launch.
 3. Restart Claude Code. Your pet appears and reacts.
 
-Control it from the **✳ menu-bar icon**: show/hide, get custom pets, load a pet,
-reset to default, reinstall hooks, or uninstall. (No installer scripts — the app installs and removes
+Control it from the **✳ menu-bar icon**: show/hide, switch theme, toggle the
+attention alerts and info readouts, get custom pets, load a pet, reset to default,
+reinstall hooks, or uninstall. (No installer scripts — the app installs and removes
 itself, so there's never a quarantine-gated `.command` to fight.)
 
 ### One-click (for technical friends)

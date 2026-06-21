@@ -18,9 +18,10 @@ swift build -c release                                  # build (the only build 
 .build/release/ClaudePet --render running /tmp/p.png    # offscreen PNG preview of a state
 .build/release/ClaudePet --render-stack /tmp/s.png      # offscreen preview of the multi-session stack
 .build/release/ClaudePet --render-menubar /tmp/m.png   # preview the menu-bar icon (each state, dark+light bar)
-.build/release/ClaudePet --selftest                    # drive real NSEvent click/drag through handlers (CI gate)
+.build/release/ClaudePet --selftest                    # drive real NSEvent click/drag through handlers + logic checks (CI gate)
 .build/release/ClaudePet --make-icon /tmp/icon.png      # render the app icon
 .build/release/ClaudePet --aititle /path/to/transcript.jsonl   # debug AI-title parsing
+.build/release/ClaudePet --meta /path/to/transcript.jsonl      # debug transcript meta (title/model/context/branch)
 
 ./install.sh                                            # build + wire hooks (dev install)
 bash scripts/make-app.sh 1.0.0                          # package dist/ClaudePet.app + installers
@@ -41,8 +42,8 @@ interaction handlers or the `--state` / hook-routing path. CI also requires a cl
 The binary is **dual-mode**, dispatched by `argv[1]` at the bottom of `main.swift`:
 
 - **CLI mode** (`--state`, `--install-hooks`, `--uninstall-hooks`, `--render`, `--render-stack`,
-  `--render-menubar`, `--selftest`, `--make-icon`, `--aititle`): does its work and `exit(0)` —
-  never starts the GUI event loop.
+  `--render-menubar`, `--selftest`, `--make-icon`, `--aititle`, `--meta`): does its work and
+  `exit(0)` — never starts the GUI event loop.
 - **GUI mode** (no args): acquires a singleton lock, runs the `NSApplication` overlay.
 
 ### The data flow (no polling of Claude, no network)
@@ -77,6 +78,54 @@ hides the list and just shows the pet with its name.
 The user's manual arrangement (`order` + `selectedID`) is persisted to
 `~/.claude-pet/layout.json` and restored on launch (stale ids pruned in `sync()`), so it
 survives overlay restarts.
+
+### Surfacing what Claude Code exposes (the companion data)
+
+The pet shows *what* a session is doing and *why* it stopped, from two sources — no
+polling, no network:
+
+- **Hook payload → `detail`.** `readHookInput()` returns a `HookInput` (session/cwd/
+  transcript/source **plus** `tool_name`, `message`, `error_type`). `writeState()` calls
+  `detailFor(state:_:)` to fold the payload into one short string stored on the session
+  file: a tool **verb** for running states (`toolVerb()`: Edit→"editing", Bash→"running",
+  Grep/Glob→"searching", WebFetch→"browsing", Task→"delegating", mcp__*→"calling tool"…),
+  the **Notification message** for `waiting`, and the humanized **StopFailure reason** for
+  `failed` (`errorReason()`: rate_limit→"rate limited"…). The pill shows `detail` in place
+  of the bare state label when present.
+- **Transcript tail → `SessionMeta`.** `readTranscriptMeta()` does ONE tail read (128 KB)
+  and extracts the title (ai-title/custom-title, same precedence as before), the latest
+  `assistant.message.model`, the current **context size** (`input + cache_read +
+  cache_creation` tokens of the latest complete assistant record), and the **gitBranch**.
+  `readAITitle()` now just calls it. The GUI caches a `SessionMeta` per session in
+  `metaCache` keyed by transcript mtime; `metaLine()` formats `model · Nk ctx · branch`
+  (humanized by `shortModel()` / `compactTokens()`), drawn dim under the caption.
+
+The selected `PetView` stacks **pet → pill (`detail`/label + `· elapsed`) → caption
+(title) → meta line**. `elapsedText` is **time-in-state**: `AppDelegate.stateSince[id]`
+is stamped whenever a session's state changes; `compactElapsed()` renders it. `PETH` was
+widened to fit the extra meta line.
+
+### Preferences, themes, alerts, and the pet-tap
+
+- **`Prefs`** (`~/.claude-pet/prefs.json`, loaded at launch, saved on every toggle): theme
+  id, `soundOnAttention`, `bounceOnAttention`, `muted`, `showMeta`, `showElapsed`. All
+  fields are optional-with-defaults so older files keep decoding. `applyToGlobals()` pushes
+  the theme into `Theme.current`. The **✳ menu is rebuilt** (`rebuildMenu()`) after each
+  change so checkmarks/theme dots stay in sync; `commitPrefs()` saves + rebuilds.
+- **Themes** are `Palette`s (`claude`/`midnight`/`grove`/`mono`). `Theme` is no longer a
+  bag of `static let`s — `Theme.coral`/`termBG`/… are computed from `Theme.current`, so a
+  theme switch recolors **everything** (pet, pills, rows, menu-bar icon) on the next
+  redraw. Add a palette to `Palette.all` and it appears in the Theme submenu automatically.
+- **Attention alerts.** `sync()` tracks `prevStates[id]`; on a transition INTO an attention
+  state (`waiting`/`failed`, not from another attention state) it calls
+  `fireAttentionAlert()` — an `NSSound` chime and `requestUserAttention` bounce, each
+  gated by prefs and debounced. `didInitialSync` suppresses alerts for sessions already
+  present at launch (no startup spam). No `UNUserNotificationCenter` — it would need
+  entitlements the accessory binary can't rely on; sound + bounce work unconditionally.
+- **Pet-tap.** A non-drag tap landing inside `primary.frame` fires `StackView.onPetTapped`
+  → `PetView.poke()`: a one-shot happy hop (`pokeUntil` adds a decaying bounce to the
+  mascot's `motion()`) that settles back to `baseState` (the real session state) via the
+  existing one-shot-fallback machinery.
 
 Animation is **continuous (30fps, `PetView.advance()` driven by a `ticks`/`phase` clock)**,
 not discrete frame stepping. Motion is keyed to an *attention budget* (`PetView.motion()`):
@@ -275,9 +324,11 @@ The zip contains **only the notarized `ClaudePet.app`** — drag to `/Applicatio
 builds are **signed with a Developer ID and notarized** (when the CI secrets are configured), so
 they launch with no Gatekeeper prompt. **The app is its own installer**: on launch the GUI calls
 `hooksPointToSelf()` and runs `installHooks()` if the hooks are missing or point at a different
-path (so moving the app self-heals the absolute hook path). The **✳ menu** exposes *Get Custom
-Pets (codex-pets.net)…* (`browseCustomPets` — opens the gallery in the browser and spells out
-the download → *Load Pet…* flow), *Reinstall Claude Code Hooks* (`reinstallHooks`) and
+path (so moving the app self-heals the absolute hook path). The **✳ menu** exposes *Theme ▸*
+(`pickTheme`), the alert/info toggles (`toggleSound`/`toggleBounce`/`toggleMuted`/`toggleMeta`/
+`toggleElapsed` — all routed through `commitPrefs()`), *Get Custom Pets (codex-pets.net)…*
+(`browseCustomPets` — opens the gallery in the browser and spells out the download → *Load
+Pet…* flow), *Reinstall Claude Code Hooks* (`reinstallHooks`) and
 *Uninstall Claude Pet…* (`uninstallSelf` — unwires hooks, deletes `~/.claude-pet`, removes the
 bundle, quits). We deliberately ship **no `.command`
 scripts**: a downloaded script is always quarantine-gated, which defeated the old installer. If a

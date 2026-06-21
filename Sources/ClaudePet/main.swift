@@ -14,19 +14,68 @@ let settingsURL = home.appendingPathComponent(".claude/settings.json")
 // One state file per Claude Code session -> one session in the stack.
 let sessionsDir = stateDir.appendingPathComponent("sessions")
 let layoutURL = stateDir.appendingPathComponent("layout.json")   // persisted manual order + selection
+let prefsURL = stateDir.appendingPathComponent("prefs.json")     // persisted user preferences
 func sessionFile(_ id: String) -> URL { sessionsDir.appendingPathComponent(id + ".json") }
 let SESSION_STALE_SECONDS: TimeInterval = 12 * 3600
 // Active sprite sheet — Codex pets ship a WebP, so .webp is preferred.
 let activeNames = ["active.webp", "active.png"]
 
-// MARK: - Theme (Claude Code terminal aesthetic)
+// MARK: - Theme (swappable color palettes; default = Claude Code terminal aesthetic)
+//
+// `Theme.coral` etc. stay the API everywhere; they read from the currently selected
+// `Palette`. Switching themes (menu / prefs) just swaps `Theme.current` and triggers
+// a redraw — every call site (pet, pills, rows, menu-bar icon) picks up the new colors.
+
+struct Palette {
+    let id: String
+    let name: String
+    let coral: NSColor    // primary accent
+    let termBG: NSColor   // panel / body fill
+    let termFG: NSColor   // text
+    let green: NSColor    // positive / working
+    let red: NSColor      // attention / error
+}
+
+extension Palette {
+    static let claude = Palette(
+        id: "claude", name: "Claude",
+        coral:  NSColor(red: 0.851, green: 0.467, blue: 0.341, alpha: 1.0),   // #D97757
+        termBG: NSColor(red: 0.106, green: 0.106, blue: 0.106, alpha: 0.94),  // #1B1B1B
+        termFG: NSColor(red: 0.910, green: 0.902, blue: 0.886, alpha: 1.0),   // #E8E6E3
+        green:  NSColor(red: 0.310, green: 0.690, blue: 0.435, alpha: 1.0),   // #4FB06D
+        red:    NSColor(red: 0.851, green: 0.333, blue: 0.290, alpha: 1.0))   // #D9544A
+    static let midnight = Palette(
+        id: "midnight", name: "Midnight",
+        coral:  NSColor(red: 0.553, green: 0.612, blue: 0.965, alpha: 1.0),   // periwinkle
+        termBG: NSColor(red: 0.078, green: 0.086, blue: 0.137, alpha: 0.95),  // deep navy
+        termFG: NSColor(red: 0.886, green: 0.910, blue: 0.969, alpha: 1.0),
+        green:  NSColor(red: 0.376, green: 0.788, blue: 0.690, alpha: 1.0),   // teal
+        red:    NSColor(red: 0.953, green: 0.451, blue: 0.529, alpha: 1.0))   // rose
+    static let grove = Palette(
+        id: "grove", name: "Grove",
+        coral:  NSColor(red: 0.831, green: 0.690, blue: 0.216, alpha: 1.0),   // amber
+        termBG: NSColor(red: 0.090, green: 0.114, blue: 0.094, alpha: 0.95),  // forest
+        termFG: NSColor(red: 0.894, green: 0.910, blue: 0.882, alpha: 1.0),
+        green:  NSColor(red: 0.420, green: 0.776, blue: 0.408, alpha: 1.0),
+        red:    NSColor(red: 0.890, green: 0.486, blue: 0.337, alpha: 1.0))
+    static let mono = Palette(
+        id: "mono", name: "Mono",
+        coral:  NSColor(white: 0.78, alpha: 1.0),
+        termBG: NSColor(white: 0.10, alpha: 0.95),
+        termFG: NSColor(white: 0.93, alpha: 1.0),
+        green:  NSColor(white: 0.86, alpha: 1.0),
+        red:    NSColor(white: 0.66, alpha: 1.0))
+    static let all: [Palette] = [.claude, .midnight, .grove, .mono]
+    static func byID(_ id: String) -> Palette { all.first { $0.id == id } ?? .claude }
+}
 
 enum Theme {
-    static let coral  = NSColor(red: 0.851, green: 0.467, blue: 0.341, alpha: 1.0)  // #D97757
-    static let termBG = NSColor(red: 0.106, green: 0.106, blue: 0.106, alpha: 0.94) // #1B1B1B
-    static let termFG = NSColor(red: 0.910, green: 0.902, blue: 0.886, alpha: 1.0)  // #E8E6E3
-    static let green  = NSColor(red: 0.310, green: 0.690, blue: 0.435, alpha: 1.0)  // #4FB06D
-    static let red    = NSColor(red: 0.851, green: 0.333, blue: 0.290, alpha: 1.0)  // #D9544A
+    static var current: Palette = .claude
+    static var coral:  NSColor { current.coral }
+    static var termBG: NSColor { current.termBG }
+    static var termFG: NSColor { current.termFG }
+    static var green:  NSColor { current.green }
+    static var red:    NSColor { current.red }
 }
 
 // MARK: - Codex atlas contract (8x9, 192x208 cells, WebP) — codex-pets.net compatible
@@ -60,6 +109,96 @@ func loadFrames() -> Frames {
 
 struct PetState: Codable { var state = "idle"; var cwd: String?; var transcript: String?; var detail: String?; var cleared: Bool? }
 
+// MARK: - Preferences (persisted to ~/.claude-pet/prefs.json)
+//
+// Small, additive, and forward-compatible (all optional with defaults), so older
+// files keep decoding as new keys are added. Loaded once at launch and after every
+// menu toggle; `applyToGlobals()` pushes the theme into `Theme.current`.
+
+struct Prefs: Codable {
+    var theme: String = "claude"        // Palette id
+    var soundOnAttention: Bool = true   // chime when a session needs you / fails
+    var bounceOnAttention: Bool = true  // requestUserAttention (bounce) on the same
+    var showMeta: Bool = true           // model · context · branch line under the pet
+    var showElapsed: Bool = true        // time-in-state suffix in the status pill
+    var muted: Bool = false             // master mute for all attention alerts
+
+    static func load() -> Prefs {
+        if let d = try? Data(contentsOf: prefsURL),
+           let p = try? JSONDecoder().decode(Prefs.self, from: d) { return p }
+        return Prefs()
+    }
+    func save() {
+        if let d = try? JSONEncoder().encode(self) { try? d.write(to: prefsURL) }
+    }
+    func applyToGlobals() { Theme.current = Palette.byID(theme) }
+}
+
+// MARK: - Humanizers for the data Claude Code exposes
+
+// Map a tool name (from Pre/PostToolUse hooks) to a short, human verb for the pill.
+func toolVerb(_ tool: String) -> String {
+    switch tool {
+    case "Edit", "MultiEdit", "Write", "NotebookEdit": return "editing"
+    case "Read", "NotebookRead":                        return "reading"
+    case "Bash", "BashOutput", "KillShell":             return "running"
+    case "Grep", "Glob", "LS":                          return "searching"
+    case "WebFetch", "WebSearch":                       return "browsing"
+    case "Task", "Agent":                               return "delegating"
+    case "TodoWrite":                                   return "planning"
+    default:
+        if tool.hasPrefix("mcp__") { return "calling tool" }
+        return tool.isEmpty ? "working" : tool.lowercased()
+    }
+}
+
+// Map a StopFailure `error_type` to a short, human reason for the pill.
+func errorReason(_ type: String) -> String {
+    switch type {
+    case "rate_limit":            return "rate limited"
+    case "overloaded":            return "overloaded"
+    case "authentication_failed": return "auth failed"
+    case "oauth_org_not_allowed": return "org blocked"
+    case "billing_error":         return "billing issue"
+    case "invalid_request":       return "bad request"
+    case "model_not_found":       return "model missing"
+    case "max_output_tokens":     return "output limit"
+    case "server_error":          return "server error"
+    default:                      return "error"
+    }
+}
+
+// Short model label from a full model id (claude-opus-4-8 -> "opus 4.8").
+func shortModel(_ id: String) -> String {
+    let lower = id.lowercased()
+    let family = ["opus", "sonnet", "haiku", "fable"].first { lower.contains($0) }
+    guard let fam = family else { return id }
+    // Pull the version digits that follow the family name, e.g. "...opus-4-8..." -> "4.8".
+    if let r = lower.range(of: fam) {
+        let tail = lower[r.upperBound...]
+        let nums = tail.split(whereSeparator: { !$0.isNumber }).prefix(2).map(String.init)
+        if !nums.isEmpty { return fam + " " + nums.joined(separator: ".") }
+    }
+    return fam
+}
+
+// Compact a token count: 1234 -> "1.2k", 45000 -> "45k", 1200000 -> "1.2M".
+func compactTokens(_ n: Int) -> String {
+    if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+    if n >= 10_000 { return "\(n / 1000)k" }
+    if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1000) }
+    return "\(n)"
+}
+
+// Compact elapsed duration: "8s", "5m", "2h", "1d".
+func compactElapsed(_ seconds: TimeInterval) -> String {
+    let s = Int(max(0, seconds))
+    if s < 60 { return "\(s)s" }
+    if s < 3600 { return "\(s / 60)m" }
+    if s < 86400 { return "\(s / 3600)h" }
+    return "\(s / 86400)d"
+}
+
 // Read the session's title from its transcript (JSONL). Two kinds of records
 // carry a title: "ai-title" (auto-generated, field "aiTitle") and "custom-title"
 // (the user's manual rename, field "customTitle"). For each kind the latest near
@@ -74,23 +213,67 @@ struct PetState: Codable { var state = "idle"; var cwd: String?; var transcript:
 // those we ignore custom titles entirely and fall back to a fresh ai-title or
 // the project folder, which is what "the name resets on clear" means in practice.
 func readAITitle(_ path: String, ignoreCustom: Bool = false) -> String? {
-    guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
+    return readTranscriptMeta(path, ignoreCustom: ignoreCustom).title
+}
+
+// Everything we surface about a session from its transcript, in ONE tail scan:
+// the display title, the latest model, the current context size (tokens), and the
+// git branch. All optional — a fresh/empty transcript just yields nils.
+struct SessionMeta { var title: String?; var model: String?; var ctxTokens: Int?; var branch: String? }
+
+// Read the session's metadata from the tail of its transcript (JSONL). Titles come
+// from "ai-title" (auto) / "custom-title" (manual rename) records — a manual rename
+// wins, and for each kind the latest near the end wins (see `ignoreCustom` for the
+// /clear behavior). Model + context tokens come from the latest complete "assistant"
+// record's `message.model` / `message.usage`; the branch from the latest record that
+// carries `gitBranch`. Only the file tail is scanned so this stays cheap on large
+// transcripts; a response longer than the window just leaves model/ctx one turn stale.
+func readTranscriptMeta(_ path: String, ignoreCustom: Bool = false) -> SessionMeta {
+    var meta = SessionMeta()
+    guard let fh = FileHandle(forReadingAtPath: path) else { return meta }
     defer { try? fh.close() }
     let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int ?? 0
-    let chunk = 65536
-    if size > chunk { try? fh.seek(toOffset: UInt64(size - chunk)) }
-    guard let data = try? fh.readToEnd(), let text = String(data: data, encoding: .utf8) else { return nil }
+    let chunk = 131072
+    let seeked = size > chunk
+    if seeked { try? fh.seek(toOffset: UInt64(size - chunk)) }
+    guard let data = try? fh.readToEnd(), let text = String(data: data, encoding: .utf8) else { return meta }
     var aiTitle: String?, customTitle: String?
-    for line in text.split(separator: "\n")
-        where line.contains("\"type\":\"ai-title\"") || line.contains("\"type\":\"custom-title\"") {
-        if let d = line.data(using: .utf8),
-           let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
-            if let t = o["customTitle"] as? String, !t.isEmpty { customTitle = t }
-            else if let t = o["aiTitle"] as? String, !t.isEmpty { aiTitle = t }
+    var lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    if seeked && !lines.isEmpty { lines.removeFirst() }   // drop the partial first line
+    for line in lines {
+        // Title records are tiny and matched cheaply by substring first.
+        if line.contains("\"type\":\"ai-title\"") || line.contains("\"type\":\"custom-title\"") {
+            if let d = line.data(using: .utf8),
+               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                if let t = o["customTitle"] as? String, !t.isEmpty { customTitle = t }
+                else if let t = o["aiTitle"] as? String, !t.isEmpty { aiTitle = t }
+            }
+            continue
+        }
+        // Branch is cheap to pluck from any record that carries it.
+        if meta.branch == nil || line.contains("\"gitBranch\"") {
+            if let d = line.data(using: .utf8),
+               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+               let b = o["gitBranch"] as? String, !b.isEmpty { meta.branch = b }
+        }
+        // Model + context size from the latest parseable assistant record.
+        if line.contains("\"type\":\"assistant\"") {
+            if let d = line.data(using: .utf8),
+               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+               let m = o["message"] as? [String: Any] {
+                if let model = m["model"] as? String, !model.isEmpty { meta.model = model }
+                if let u = m["usage"] as? [String: Any] {
+                    let inp = (u["input_tokens"] as? Int) ?? 0
+                    let cr  = (u["cache_read_input_tokens"] as? Int) ?? 0
+                    let cc  = (u["cache_creation_input_tokens"] as? Int) ?? 0
+                    let total = inp + cr + cc
+                    if total > 0 { meta.ctxTokens = total }
+                }
+            }
         }
     }
-    if ignoreCustom { return aiTitle }
-    return customTitle ?? aiTitle
+    meta.title = ignoreCustom ? aiTitle : (customTitle ?? aiTitle)
+    return meta
 }
 
 // MARK: - State model
@@ -266,11 +449,28 @@ final class PetView: NSView {
     var bubbleDot: NSColor?
     var oneShotFallback: String?
     var caption: String?
+    var detail: String?          // verb / reason folded into the pill ("editing", "rate limited"…)
+    var elapsedText: String?     // time-in-state, e.g. "12s" (shown when showElapsed)
+    var metaText: String?        // "opus 4.8 · 45k · main" line under the caption
+    var showElapsed = true
+    var baseState = "idle"       // the true session state, so a one-shot poke returns to it
 
     private var ticks = 0
     private var spriteAccum = 0.0
     private var oneShotElapsed = 0.0
+    private var pokeUntil = 0.0   // ticks-based: extra happy bounce window after a tap
     private var phase: Double { Double(ticks) / 30.0 }
+
+    // A friendly reaction when the user taps the pet: a happy hop now, settling back
+    // into whatever the session is actually doing. Purely cosmetic.
+    func poke() {
+        let d = describe("jumping")
+        anim = d.anim; bubbleLabel = "hi!"; bubbleDot = Theme.coral
+        frameIndex = 0; spriteAccum = 0; oneShotElapsed = 0
+        oneShotFallback = baseState        // fall back to the real state, not the generic default
+        pokeUntil = Double(ticks) + 21     // ~0.7s of extra bounce for the code-drawn mascot
+        needsDisplay = true
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }   // container handles mouse
     private func anims() -> [String: [Int]] { cfg.animations ?? codexAnimations() }
@@ -325,19 +525,25 @@ final class PetView: NSView {
     // Attention-keyed motion: working/idle barely move; waiting bobs + red halo; failed shakes.
     private func motion() -> (dx: CGFloat, dy: CGFloat, ring: CGFloat) {
         let p = phase
+        var m: (dx: CGFloat, dy: CGFloat, ring: CGFloat)
         switch anim {
         case "waiting":
             let s = (sin(p * 2 * .pi * 1.1) + 1) / 2
-            return (0, CGFloat(s) * 7, CGFloat(s))
+            m = (0, CGFloat(s) * 7, CGFloat(s))
         case "failed":
-            return (CGFloat(sin(p * 2 * .pi * 6)) * 2.5, 0, 0)
+            m = (CGFloat(sin(p * 2 * .pi * 6)) * 2.5, 0, 0)
         case "review", "jumping", "done", "ready":
-            return (0, CGFloat((sin(p * 2 * .pi * 0.8) + 1) / 2) * 3, 0)
+            m = (0, CGFloat((sin(p * 2 * .pi * 0.8) + 1) / 2) * 3, 0)
         case "idle":
-            return (0, CGFloat(sin(p * 2 * .pi * 0.25)) * 1.2, 0)
+            m = (0, CGFloat(sin(p * 2 * .pi * 0.25)) * 1.2, 0)
         default:
-            return (0, 0, 0)                                   // working: still & busy
+            m = (0, 0, 0)                                      // working: still & busy
         }
+        if Double(ticks) < pokeUntil {                        // snappy hop right after a tap
+            let t = (pokeUntil - Double(ticks)) / 21          // 1 -> 0 over the window
+            m.dy += CGFloat(abs(sin(t * .pi * 2))) * CGFloat(t) * 10
+        }
+        return m
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -374,27 +580,57 @@ final class PetView: NSView {
             drawBuddy(in: dest, accent: accentFor(anim), anim: anim, phase: phase)
         }
 
-        // Text uses the BASE rect (no bob) so it stays stable: pet -> pill -> caption.
+        // Text uses the BASE rect (no bob) so it stays stable: pet -> pill -> caption -> meta.
         let textRect = NSRect(x: baseX, y: baseY, width: drawW, height: drawH)
         var topY = textRect.maxY
-        if let label = bubbleLabel { topY = drawBubble(label, dot: bubbleDot, above: textRect) }
-        if let cap = caption { drawCaption(cap, atY: topY + 5) }
+        if let label = pillText() { topY = drawBubble(label, dot: bubbleDot, above: textRect) }
+        if let cap = caption { topY = drawCaption(cap, atY: topY + 5) }
+        if let meta = metaText { drawMeta(meta, atY: topY + 2) }
+    }
+
+    // The status pill text: the activity/reason (detail) takes over the bare state
+    // label when present ("editing" instead of "working"; the notification reason
+    // instead of "needs you"), with the time-in-state appended when enabled.
+    private func pillText() -> String? {
+        var base = detail ?? bubbleLabel
+        if base == nil { return nil }
+        let font = NSFont(name: "Menlo", size: 11) ?? NSFont.boldSystemFont(ofSize: 11)
+        base = truncated(base!, font: font, maxW: bounds.width - 44)   // leave room for dot + padding
+        if showElapsed, let e = elapsedText { return base! + " · " + e }
+        return base
     }
 
     // Dim project/session label above the pill. Long AI titles wrap to two lines.
-    private func drawCaption(_ text: String, atY y: CGFloat) {
+    // Returns the Y above the topmost caption line so the meta line can stack on it.
+    @discardableResult
+    private func drawCaption(_ text: String, atY y: CGFloat) -> CGFloat {
         let font: NSFont = NSFont(name: "Menlo", size: 9) ?? NSFont.systemFont(ofSize: 9)
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG.withAlphaComponent(0.7)]
         let maxW = bounds.width - 6
         let lines = wrapCaption(text, maxW: maxW, attrs: attrs)
         let lineH = (font.ascender - font.descender) + 1
+        var top = y
         for (i, line) in lines.enumerated() {
             let s = line as NSString
             let sz = s.size(withAttributes: attrs)
             let x = min(max(2, (bounds.width - sz.width) / 2), bounds.width - sz.width - 2)
-            let ly = y + CGFloat(lines.count - 1 - i) * lineH
-            s.draw(at: NSPoint(x: x, y: min(ly, bounds.height - sz.height - 2)), withAttributes: attrs)
+            let ly = min(y + CGFloat(lines.count - 1 - i) * lineH, bounds.height - sz.height - 2)
+            s.draw(at: NSPoint(x: x, y: ly), withAttributes: attrs)
+            top = max(top, ly + sz.height)
         }
+        return top
+    }
+
+    // The companion "intelligence" line: model · context · branch, parsed from the
+    // transcript. Dim and small; the coral accent ties it to the rest of the chrome.
+    private func drawMeta(_ text: String, atY y: CGFloat) {
+        let font: NSFont = NSFont(name: "Menlo", size: 8) ?? NSFont.systemFont(ofSize: 8)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.coral.withAlphaComponent(0.78)]
+        let s = truncated(text, font: font, maxW: bounds.width - 6) as NSString
+        let sz = s.size(withAttributes: attrs)
+        let x = min(max(2, (bounds.width - sz.width) / 2), bounds.width - sz.width - 2)
+        let ly = min(y, bounds.height - sz.height - 1)
+        s.draw(at: NSPoint(x: x, y: ly), withAttributes: attrs)
     }
 
     private func wrapCaption(_ text: String, maxW: CGFloat, attrs: [NSAttributedString.Key: Any]) -> [String] {
@@ -456,8 +692,9 @@ final class StackView: NSView {
     var onSelect: ((String) -> Void)?
     var onReorder: (([String]) -> Void)?
     var onCycle: ((Int) -> Void)?
+    var onPetTapped: (() -> Void)?
 
-    let W: CGFloat = 232, PETH: CGFloat = 158
+    let W: CGFloat = 232, PETH: CGFloat = 178
     let rowH: CGFloat = 26, innerPad: CGFloat = 7, margin: CGFloat = 8, gap: CGFloat = 6
     private var downInWin = NSPoint.zero    // mouse-down point in view coords
     private var lastScreen = NSPoint.zero   // for window dragging (screen coords)
@@ -587,6 +824,8 @@ final class StackView: NSView {
         if let di = dragIndex {
             if moved > 3 { onReorder?(items.map { $0.id }) }    // committed a manual reorder
             else { onSelect?(items[di].id) }                   // a click -> select
+        } else if windowDrag, moved <= 3, primary.frame.contains(downInWin) {
+            onPetTapped?()                                      // a tap on the pet (not a drag) -> react
         }
         dragIndex = nil; windowDrag = false; dragging = false; needsDisplay = true
     }
@@ -611,13 +850,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var selectedID: String?
     var appliedKey = ""
     var menuIconKey = ""
-    var titleCache: [String: (mtime: Date?, title: String?)] = [:]
+    var metaCache: [String: (mtime: Date?, meta: SessionMeta)] = [:]
+    var prefs = Prefs()
+    var prevStates: [String: String] = [:]   // last-seen state per session (for transition alerts)
+    var stateSince: [String: Date] = [:]      // when each session entered its current state
+    var didInitialSync = false                // suppress alerts for sessions present at launch
 
     func setupMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateMenuBarIcon("idle")
+        rebuildMenu()
+    }
+
+    // Rebuilt (rather than mutated) after each toggle so checkmarks/theme dots stay in
+    // sync with `prefs` without juggling item references.
+    func rebuildMenu() {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Show / Hide", action: #selector(toggleVisibility), keyEquivalent: "p"))
+        menu.addItem(.separator())
+
+        // Theme submenu
+        let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
+        let themeMenu = NSMenu()
+        for p in Palette.all {
+            let it = NSMenuItem(title: p.name, action: #selector(pickTheme(_:)), keyEquivalent: "")
+            it.representedObject = p.id
+            it.state = (prefs.theme == p.id) ? .on : .off
+            themeMenu.addItem(it)
+        }
+        themeItem.submenu = themeMenu
+        menu.addItem(themeItem)
+
+        // Preference toggles
+        func toggle(_ title: String, _ on: Bool, _ sel: Selector) -> NSMenuItem {
+            let it = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+            it.state = on ? .on : .off
+            return it
+        }
+        menu.addItem(toggle("Sound on Attention", prefs.soundOnAttention && !prefs.muted, #selector(toggleSound)))
+        menu.addItem(toggle("Bounce on Attention", prefs.bounceOnAttention && !prefs.muted, #selector(toggleBounce)))
+        menu.addItem(toggle("Mute All Alerts", prefs.muted, #selector(toggleMuted)))
+        menu.addItem(.separator())
+        menu.addItem(toggle("Show Session Info", prefs.showMeta, #selector(toggleMeta)))
+        menu.addItem(toggle("Show Time in State", prefs.showElapsed, #selector(toggleElapsed)))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Get Custom Pets (codex-pets.net)…", action: #selector(browseCustomPets), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Load Pet… (Codex .webp or folder)", action: #selector(loadSprite), keyEquivalent: "l"))
@@ -628,6 +903,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Quit Claude Pet", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
     }
+
+    private func commitPrefs() { prefs.save(); rebuildMenu() }
+
+    @objc func pickTheme(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        prefs.theme = id; prefs.applyToGlobals()
+        menuIconKey = ""; updateMenuBarIcon(stack?.primary.anim ?? "idle")
+        stack?.needsDisplay = true; stack?.primary.needsDisplay = true
+        commitPrefs()
+    }
+    @objc func toggleSound()   { prefs.soundOnAttention.toggle(); commitPrefs() }
+    @objc func toggleBounce()  { prefs.bounceOnAttention.toggle(); commitPrefs() }
+    @objc func toggleMuted()   { prefs.muted.toggle(); commitPrefs() }
+    @objc func toggleMeta()    { prefs.showMeta.toggle(); commitPrefs(); sync() }
+    @objc func toggleElapsed() { prefs.showElapsed.toggle(); commitPrefs(); sync() }
 
     // Reflect the selected session's state in the menu bar (state in the key so a
     // sprite swap or state change re-renders, but steady state is a no-op).
@@ -718,6 +1008,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (and re-wire if the app was moved, since the hook stores an absolute path).
         // Lets users just open the notarized .app — no quarantine-gated installer script.
         if !hooksPointToSelf() { installHooks() }
+        prefs = Prefs.load(); prefs.applyToGlobals()
         setupMenu()
 
         stack = StackView(frame: NSRect(x: 0, y: 0, width: 232, height: 200))
@@ -725,6 +1016,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stack.onSelect = { [weak self] id in self?.selectedID = id; self?.sync() }
         stack.onReorder = { [weak self] ids in self?.order = ids; self?.sync() }
         stack.onCycle = { [weak self] d in self?.cycleSelection(d) }
+        stack.onPetTapped = { [weak self] in self?.stack.primary.poke() }
 
         window = NSWindow(contentRect: stack.frame, styleMask: .borderless, backing: .buffered, defer: false)
         window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = false
@@ -769,14 +1061,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sync()
     }
 
-    private func sessionTitle(_ id: String, _ st: PetState) -> String? {
-        guard let tp = st.transcript else { return nil }
+    private func sessionMeta(_ id: String, _ st: PetState) -> SessionMeta {
+        guard let tp = st.transcript else { return SessionMeta() }
         let m = (try? FileManager.default.attributesOfItem(atPath: tp))?[.modificationDate] as? Date
-        if titleCache[id]?.mtime != m { titleCache[id] = (m, readAITitle(tp, ignoreCustom: st.cleared == true)) }
-        return titleCache[id]?.title
+        if metaCache[id]?.mtime != m { metaCache[id] = (m, readTranscriptMeta(tp, ignoreCustom: st.cleared == true)) }
+        return metaCache[id]?.meta ?? SessionMeta()
     }
     private func folderName(_ st: PetState) -> String? { st.cwd.map { URL(fileURLWithPath: $0).lastPathComponent } }
-    private func label(_ id: String, _ st: PetState) -> String? { sessionTitle(id, st) ?? folderName(st) }
+    private func label(_ id: String, _ st: PetState) -> String? { sessionMeta(id, st).title ?? folderName(st) }
+
+    // The dim "model · context · branch" line for the selected pet, from its transcript.
+    private func metaLine(_ id: String, _ st: PetState) -> String? {
+        let m = sessionMeta(id, st)
+        var parts: [String] = []
+        if let model = m.model { parts.append(shortModel(model)) }
+        if let tok = m.ctxTokens { parts.append(compactTokens(tok) + " ctx") }
+        if let b = m.branch { parts.append(b) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func isAttentionState(_ s: String) -> Bool { s == "waiting" || s == "failed" || s == "error" }
+
+    // A single session crossing into "needs you" / "failed": optionally chime and
+    // bounce the app so you notice even when the overlay is behind other windows.
+    // Both are independently toggleable and globally mutable from the menu.
+    private var lastAlert = Date(timeIntervalSince1970: 0)
+    private func fireAttentionAlert() {
+        guard !prefs.muted else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastAlert) > 1.0 else { return }   // debounce bursts
+        lastAlert = now
+        if prefs.soundOnAttention { NSSound(named: "Submarine")?.play() }
+        if prefs.bounceOnAttention { NSApp.requestUserAttention(.informationalRequest) }
+    }
 
     private func sync() {
         let fm = FileManager.default
@@ -792,7 +1109,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 live[id] = (st, m)
             }
         }
-        for id in titleCache.keys where live[id] == nil { titleCache[id] = nil }
+        for id in metaCache.keys where live[id] == nil { metaCache[id] = nil }
+        for id in stateSince.keys where live[id] == nil { stateSince[id] = nil }
+        for id in prevStates.keys where live[id] == nil { prevStates[id] = nil }
+
+        // Track time-in-state and fire attention alerts on transitions INTO an
+        // attention state (needs you / failed), for any session — not just the
+        // selected one. The first sync after launch only records baselines so we
+        // don't alert for sessions that were already waiting when the app started.
+        let now = Date()
+        for (id, v) in live {
+            let s = v.st.state
+            if prevStates[id] != s {
+                stateSince[id] = now
+                if didInitialSync, isAttentionState(s), !isAttentionState(prevStates[id] ?? "") {
+                    fireAttentionAlert()
+                }
+                prevStates[id] = s
+            }
+        }
+        didInitialSync = true
 
         // Maintain a STABLE order: keep existing positions, append new sessions
         // (oldest-first), drop ended ones. Never reorder on state change.
@@ -813,6 +1149,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         stack.selectedID = selectedID
         stack.primary.caption = label(selectedID!, sel.st)     // shown for single AND multi (wraps to 2 lines)
+        stack.primary.baseState = sel.st.state                 // so a pet-tap reaction settles back here
+        stack.primary.detail = sel.st.detail                   // what it's doing / why it needs you
+        stack.primary.showElapsed = prefs.showElapsed
+        stack.primary.elapsedText = prefs.showElapsed
+            ? stateSince[selectedID!].map { compactElapsed(now.timeIntervalSince($0)) } : nil
+        stack.primary.metaText = prefs.showMeta ? metaLine(selectedID!, sel.st) : nil
         let key = selectedID! + "|" + sel.st.state
         if appliedKey != key { appliedKey = key; stack.primary.setState(sel.st.state) }
         updateMenuBarIcon(sel.st.state)
@@ -851,8 +1193,17 @@ func selfExecPath() -> String { Bundle.main.executablePath ?? CommandLine.argume
 // Claude Code delivers event JSON on stdin. Read it without ever blocking the
 // session: every read is gated by poll with a hard time cap, so a hook can never
 // hang (e.g. if the writer keeps the pipe open).
-func readHookInput() -> (session: String, cwd: String?, transcript: String?, source: String?) {
-    var session = "default"; var cwd: String? = nil; var transcript: String? = nil; var source: String? = nil
+struct HookInput {
+    var session = "default"
+    var cwd: String?
+    var transcript: String?
+    var source: String?       // SessionStart: "startup"|"resume"|"clear"|"compact"
+    var toolName: String?     // Pre/PostToolUse
+    var message: String?      // Notification
+    var errorType: String?    // StopFailure
+}
+func readHookInput() -> HookInput {
+    var info = HookInput()
     let fd: Int32 = 0
     var data = Data()
     var buf = [UInt8](repeating: 0, count: 4096)
@@ -865,12 +1216,33 @@ func readHookInput() -> (session: String, cwd: String?, transcript: String?, sou
         if n > 0 { data.append(buf, count: n) } else { break }
     }
     if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-        if let s = obj["session_id"] as? String, !s.isEmpty { session = s }
-        cwd = obj["cwd"] as? String
-        transcript = obj["transcript_path"] as? String
-        source = obj["source"] as? String      // SessionStart only: "startup"|"resume"|"clear"|"compact"
+        if let s = obj["session_id"] as? String, !s.isEmpty { info.session = s }
+        info.cwd = obj["cwd"] as? String
+        info.transcript = obj["transcript_path"] as? String
+        info.source = obj["source"] as? String
+        info.toolName = obj["tool_name"] as? String
+        info.message = obj["message"] as? String
+        info.errorType = obj["error_type"] as? String
     }
-    return (session, cwd, transcript, source)
+    return info
+}
+
+// Pick a short, human "detail" string for a state from the hook payload, so the pet's
+// pill can say *what* it's doing / *why* it needs you — not just the bare state.
+func detailFor(state: String, _ info: HookInput) -> String? {
+    switch state {
+    case "running", "running-left", "running-right":
+        guard let t = info.toolName, !t.isEmpty else { return nil }   // e.g. UserPromptSubmit has none
+        return toolVerb(t)
+    case "waiting":
+        if let m = info.message, !m.isEmpty { return m }
+        return nil
+    case "failed":
+        if let e = info.errorType, !e.isEmpty { return errorReason(e) }
+        return nil
+    default:
+        return nil
+    }
 }
 
 func writeState(_ state: String) {
@@ -881,6 +1253,7 @@ func writeState(_ state: String) {
     var obj: [String: Any] = ["state": state]
     if let c = info.cwd { obj["cwd"] = c }
     if let t = info.transcript { obj["transcript"] = t }
+    if let d = detailFor(state: state, info) { obj["detail"] = d }   // what it's doing / why it needs you
     // A `/clear` reuses the session_id but starts a fresh conversation; sticky
     // once set so later state writes (running, waiting…) don't drop it. The flag
     // dies with the session file on SessionEnd ("off").
@@ -1050,10 +1423,13 @@ func selfTest() -> Bool {
     check("click row selects that session", selected == "b")
     check("click does NOT reorder", reordered == nil)
 
-    // 2) Click the pet area (below the list) -> no selection change.
+    // 2) Click the pet area (below the list) -> no selection change, but it pokes the pet.
     selected = nil
+    var poked = false
+    sv.onPetTapped = { poked = true }
     click(NSPoint(x: sv.W / 2, y: sv.margin + 10))
     check("click on pet does not select a row", selected == nil)
+    check("tap on pet triggers a reaction", poked)
 
     // 3) Drag row 0 ("a") down to the bottom -> order changes, "a" moves off the top.
     sv.items = items; sv.selectedID = "a"; reordered = nil
@@ -1070,6 +1446,24 @@ func selfTest() -> Bool {
     sv.mouseUp(with: evt(.leftMouseUp, rowCenter(1)))
     check("isReordering clears after drag", !sv.isReordering)
 
+    // 5) Data humanizers used to surface what Claude Code exposes.
+    check("toolVerb maps edit tools", toolVerb("Edit") == "editing" && toolVerb("Bash") == "running")
+    check("toolVerb handles mcp + unknown", toolVerb("mcp__x__y") == "calling tool")
+    check("shortModel parses family + version", shortModel("claude-opus-4-8") == "opus 4.8")
+    check("compactTokens humanizes", compactTokens(43958) == "43k" && compactTokens(1_200_000) == "1.2M")
+    check("compactElapsed humanizes", compactElapsed(90) == "1m" && compactElapsed(5) == "5s")
+    check("errorReason maps types", errorReason("rate_limit") == "rate limited")
+    check("detailFor reads hook payload", detailFor(state: "running", { var h = HookInput(); h.toolName = "Read"; return h }()) == "reading")
+
+    // 6) Theme palettes resolve and are swappable.
+    check("palette lookup falls back", Palette.byID("nope").id == "claude" && Palette.byID("midnight").id == "midnight")
+
+    // 7) Prefs round-trip (in-memory; never touches the user's prefs.json).
+    var p = Prefs(); p.theme = "grove"; p.muted = true; p.showMeta = false
+    if let d = try? JSONEncoder().encode(p), let r = try? JSONDecoder().decode(Prefs.self, from: d) {
+        check("prefs round-trip", r.theme == "grove" && r.muted && !r.showMeta)
+    } else { check("prefs round-trip", false) }
+
     print(ok ? "SELFTEST: ALL PASS" : "SELFTEST: FAILURES")
     return ok
 }
@@ -1080,6 +1474,9 @@ func renderStack(to path: String) {
     sv.primary.cfg = loadFrames(); sv.primary.sprite = loadActiveSprite()
     sv.primary.caption = "Validate race prediction methodology"
     sv.primary.setState("waiting")
+    sv.primary.detail = "permission: run Bash"     // why it needs you (from the Notification hook)
+    sv.primary.elapsedText = "2m"                   // time-in-state
+    sv.primary.metaText = "opus 4.8 · 43k ctx · main"  // model · context · branch (from transcript)
     sv.selectedID = "sel"
     sv.items = [
         SessionItem(id: "sel", state: "waiting", label: "Validate race prediction methodology"),
@@ -1109,7 +1506,12 @@ func renderState(_ state: String, to path: String) {
     _ = NSApplication.shared
     let v = PetView(frame: NSRect(x: 0, y: 0, width: 232, height: 200))
     v.cfg = loadFrames(); v.sprite = loadActiveSprite()
-    v.caption = ProcessInfo.processInfo.environment["CLAUDEPET_CAPTION"]   // QA preview only
+    let env = ProcessInfo.processInfo.environment
+    if let t = env["CLAUDEPET_THEME"] { Theme.current = Palette.byID(t) }   // QA preview only
+    v.caption = env["CLAUDEPET_CAPTION"]   // QA preview only
+    v.detail  = env["CLAUDEPET_DETAIL"]
+    v.metaText = env["CLAUDEPET_META"]
+    v.elapsedText = env["CLAUDEPET_ELAPSED"]
     v.setState(state)
     for _ in 0..<8 { v.advance() }                            // settle into a representative frame
     guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
@@ -1178,6 +1580,13 @@ if args.count >= 2 {
         exit(selfTest() ? 0 : 1)
     case "--aititle":
         print(readAITitle(args.count >= 3 ? args[2] : "") ?? "(no title)"); exit(0)
+    case "--meta":
+        let m = readTranscriptMeta(args.count >= 3 ? args[2] : "")
+        print("title:  \(m.title ?? "-")")
+        print("model:  \(m.model.map(shortModel) ?? "-")  (\(m.model ?? "-"))")
+        print("ctx:    \(m.ctxTokens.map(compactTokens) ?? "-")  (\(m.ctxTokens.map(String.init) ?? "-") tokens)")
+        print("branch: \(m.branch ?? "-")")
+        exit(0)
     default: break
     }
 }
