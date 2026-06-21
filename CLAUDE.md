@@ -84,21 +84,26 @@ survives overlay restarts.
 The pet shows *what* a session is doing and *why* it stopped, from two sources — no
 polling, no network:
 
-- **Hook payload → `detail`.** `readHookInput()` returns a `HookInput` (session/cwd/
-  transcript/source **plus** `tool_name`, `message`, `error_type`). `writeState()` calls
-  `detailFor(state:_:)` to fold the payload into one short string stored on the session
-  file: a tool **verb** for running states (`toolVerb()`: Edit→"editing", Bash→"running",
-  Grep/Glob→"searching", WebFetch→"browsing", Task→"delegating", mcp__*→"calling tool"…),
-  the **Notification message** for `waiting`, and the humanized **StopFailure reason** for
-  `failed` (`errorReason()`: rate_limit→"rate limited"…). The pill shows `detail` in place
-  of the bare state label when present.
+- **Hook payload → `detail`/`mode`.** `readHookInput()` returns a `HookInput` (session/cwd/
+  transcript/source **plus** `hook_event_name`, `tool_name`, `tool_input`, `message`,
+  `error_type`, `permission_mode`, `trigger`). `writeState()` calls `detailFor(state:_:)` to
+  fold the payload into one short string stored on the session file: a tool **verb + target**
+  for running states (`toolVerb()`: Edit→"editing", Bash→"running", Grep/Glob→"searching",
+  WebFetch→"browsing", Task→"delegating", mcp__*→"calling tool"…; `toolTarget()` adds the
+  file basename / first command word / quoted pattern / url host → "editing main.swift"),
+  the **Notification message** for `waiting`, the humanized **StopFailure reason** for
+  `failed` (`errorReason()`: rate_limit→"rate limited"…), and "compacting context" for the
+  **PreCompact** event. It also stores a non-default `permission_mode` as `mode` (surfaced via
+  `modeBadge()`: plan/auto-edits/bypass). The pill shows `detail` in place of the bare state
+  label when present.
 - **Transcript tail → `SessionMeta`.** `readTranscriptMeta()` does ONE tail read (128 KB)
   and extracts the title (ai-title/custom-title, same precedence as before), the latest
   `assistant.message.model`, the current **context size** (`input + cache_read +
   cache_creation` tokens of the latest complete assistant record), and the **gitBranch**.
   `readAITitle()` now just calls it. The GUI caches a `SessionMeta` per session in
-  `metaCache` keyed by transcript mtime; `metaLine()` formats `model · Nk ctx · branch`
-  (humanized by `shortModel()` / `compactTokens()`), drawn dim under the caption.
+  `metaCache` keyed by transcript mtime; `metaLine()` formats `model · Nk ctx · branch ·
+  mode` (humanized by `shortModel()` / `compactTokens()` / `modeBadge()`, mode omitted when
+  default), drawn dim under the caption.
 
 The selected `PetView` stacks **pet → pill (`detail`/label + `· elapsed`) → caption
 (title) → meta line**. `elapsedText` is **time-in-state**: `AppDelegate.stateSince[id]`

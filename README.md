@@ -40,6 +40,7 @@ Every Codex state is wired to a real Claude Code hook:
 | `running`       | `PreToolUse`            | actively working               | `● working` |
 | `running-left`  | `PostToolUse`           | step finished                  | `● working` |
 | `waiting`       | `Notification` / `PermissionRequest` | needs your input  | `● needs you` |
+| `running`       | `PreCompact`            | context being compacted        | `● compacting context` |
 | `jumping`       | `Stop`                  | turn done (→ review)           | `● done!`   |
 | `review`        | (after `Stop`)          | ready for your next prompt     | `● ready`   |
 | `failed`        | `StopFailure`           | the turn errored               | `● error`   |
@@ -68,17 +69,20 @@ The pet doesn't just show *that* Claude is busy — it shows **what it's doing**
 **why it stopped**, pulled straight from the data Claude Code hands its hooks and
 writes to the transcript:
 
-- **The status pill names the activity.** Instead of a generic "working", it says
-  `editing`, `reading`, `running`, `searching`, `browsing`, `delegating`,
-  `planning` — derived from the tool Claude is using. When it **needs you**, the
-  pill shows the actual reason ("permission: run Bash"); when it **errors**, the
-  real cause ("rate limited", "overloaded", "billing issue").
+- **The status pill names the activity — and its target.** Instead of a generic
+  "working", it says `editing main.swift`, `reading config.json`, `running npm`,
+  `searching "TODO"`, `browsing example.com`, `delegating` — the verb from the tool
+  in use plus the file / command / query it's working on. When it **needs you**, the
+  pill shows the actual reason ("permission: run Bash"); when it **errors**, the real
+  cause ("rate limited", "overloaded", "billing issue"); and during a context
+  compaction it says `compacting context`.
 - **Time-in-state.** A compact `· 12s` / `· 3m` tells you how long it's been
   working on this step or waiting for you.
 - **A live session readout.** Under the name: the **model** (`opus 4.8`), the
   **context size** so far (`43k ctx` — handy for spotting an approaching
-  auto-compact), and the **git branch** (`main`). All read cheaply from the tail
-  of the session transcript.
+  auto-compact), the **git branch** (`main`), and the **permission mode** when it's
+  not the default (`plan`, `auto-edits`, `bypass`). All read cheaply from the tail
+  of the session transcript and the hook payloads.
 
 ## Get a nudge when it needs you
 

@@ -107,7 +107,7 @@ func loadFrames() -> Frames {
     return Frames()
 }
 
-struct PetState: Codable { var state = "idle"; var cwd: String?; var transcript: String?; var detail: String?; var cleared: Bool? }
+struct PetState: Codable { var state = "idle"; var cwd: String?; var transcript: String?; var detail: String?; var mode: String?; var cleared: Bool? }
 
 // MARK: - Preferences (persisted to ~/.claude-pet/prefs.json)
 //
@@ -1077,6 +1077,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let model = m.model { parts.append(shortModel(model)) }
         if let tok = m.ctxTokens { parts.append(compactTokens(tok) + " ctx") }
         if let b = m.branch { parts.append(b) }
+        if let badge = modeBadge(st.mode) { parts.append(badge) }   // plan / auto-edits / bypass
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
@@ -1181,6 +1182,7 @@ let HOOK_WIRING: [(event: String, state: String, matcher: Bool)] = [
     ("PostToolUse",      "running-left",  true),
     ("Notification",     "waiting",       false),
     ("PermissionRequest","waiting",       false),
+    ("PreCompact",       "running",       false),
     ("Stop",             "jumping",       false),
     ("StopFailure",      "failed",        false),
     ("SessionEnd",       "off",           false),
@@ -1197,10 +1199,14 @@ struct HookInput {
     var session = "default"
     var cwd: String?
     var transcript: String?
-    var source: String?       // SessionStart: "startup"|"resume"|"clear"|"compact"
-    var toolName: String?     // Pre/PostToolUse
-    var message: String?      // Notification
-    var errorType: String?    // StopFailure
+    var source: String?           // SessionStart: "startup"|"resume"|"clear"|"compact"
+    var event: String?            // hook_event_name
+    var toolName: String?         // Pre/PostToolUse
+    var toolInput: [String: Any]? // Pre/PostToolUse (tool args: file_path, command, …)
+    var message: String?          // Notification
+    var errorType: String?        // StopFailure
+    var permissionMode: String?   // "default"|"plan"|"acceptEdits"|"bypassPermissions"
+    var trigger: String?          // PreCompact: "manual"|"auto"
 }
 func readHookInput() -> HookInput {
     var info = HookInput()
@@ -1220,20 +1226,64 @@ func readHookInput() -> HookInput {
         info.cwd = obj["cwd"] as? String
         info.transcript = obj["transcript_path"] as? String
         info.source = obj["source"] as? String
+        info.event = obj["hook_event_name"] as? String
         info.toolName = obj["tool_name"] as? String
+        info.toolInput = obj["tool_input"] as? [String: Any]
         info.message = obj["message"] as? String
         info.errorType = obj["error_type"] as? String
+        info.permissionMode = obj["permission_mode"] as? String
+        info.trigger = obj["trigger"] as? String
     }
     return info
+}
+
+// The specific target of a tool call, from `tool_input`, so the pill can say
+// "editing main.swift" / "running npm test" / "searching \"TODO\"" — not just the
+// verb. Kept short; the pill truncates anything long.
+func toolTarget(_ tool: String, _ input: [String: Any]?) -> String? {
+    guard let input = input else { return nil }
+    func str(_ k: String) -> String? { (input[k] as? String).flatMap { $0.isEmpty ? nil : $0 } }
+    switch tool {
+    case "Edit", "MultiEdit", "Write", "Read", "NotebookEdit", "NotebookRead":
+        return str("file_path").map { URL(fileURLWithPath: $0).lastPathComponent }
+    case "Bash", "BashOutput":
+        // First "word" of the command (the program being run) is the useful glance.
+        return str("command").map { String($0.split(whereSeparator: { $0 == " " || $0 == "\n" }).first ?? "") }
+    case "Grep", "Glob":
+        return str("pattern").map { "\"\($0)\"" }
+    case "WebFetch":
+        return str("url").flatMap { URL(string: $0)?.host }
+    case "WebSearch":
+        return str("query").map { "\"\($0)\"" }
+    case "Task", "Agent":
+        return str("subagent_type") ?? str("description")
+    default:
+        return nil
+    }
+}
+
+// Humanize a permission mode into a short badge (nil for the normal "default" mode).
+func modeBadge(_ mode: String?) -> String? {
+    switch mode {
+    case "plan":              return "plan"
+    case "acceptEdits":       return "auto-edits"
+    case "bypassPermissions": return "bypass"
+    default:                  return nil
+    }
 }
 
 // Pick a short, human "detail" string for a state from the hook payload, so the pet's
 // pill can say *what* it's doing / *why* it needs you — not just the bare state.
 func detailFor(state: String, _ info: HookInput) -> String? {
+    if info.event == "PreCompact" {                 // context being summarized to free room
+        return info.trigger == "manual" ? "compacting context" : "auto-compacting"
+    }
     switch state {
     case "running", "running-left", "running-right":
         guard let t = info.toolName, !t.isEmpty else { return nil }   // e.g. UserPromptSubmit has none
-        return toolVerb(t)
+        let verb = toolVerb(t)
+        if let target = toolTarget(t, info.toolInput) { return verb + " " + target }
+        return verb
     case "waiting":
         if let m = info.message, !m.isEmpty { return m }
         return nil
@@ -1254,6 +1304,7 @@ func writeState(_ state: String) {
     if let c = info.cwd { obj["cwd"] = c }
     if let t = info.transcript { obj["transcript"] = t }
     if let d = detailFor(state: state, info) { obj["detail"] = d }   // what it's doing / why it needs you
+    if let m = info.permissionMode, m != "default", !m.isEmpty { obj["mode"] = m }   // plan / auto-edits / bypass
     // A `/clear` reuses the session_id but starts a fresh conversation; sticky
     // once set so later state writes (running, waiting…) don't drop it. The flag
     // dies with the session file on SessionEnd ("off").
@@ -1454,6 +1505,15 @@ func selfTest() -> Bool {
     check("compactElapsed humanizes", compactElapsed(90) == "1m" && compactElapsed(5) == "5s")
     check("errorReason maps types", errorReason("rate_limit") == "rate limited")
     check("detailFor reads hook payload", detailFor(state: "running", { var h = HookInput(); h.toolName = "Read"; return h }()) == "reading")
+    check("toolTarget pulls file basename",
+          toolTarget("Edit", ["file_path": "/a/b/main.swift"]) == "main.swift")
+    check("toolTarget pulls bash program",
+          toolTarget("Bash", ["command": "npm test --silent"]) == "npm")
+    check("detailFor folds verb + target",
+          detailFor(state: "running", { var h = HookInput(); h.toolName = "Edit"; h.toolInput = ["file_path": "/x/y/app.ts"]; return h }()) == "editing app.ts")
+    check("detailFor handles PreCompact",
+          detailFor(state: "running", { var h = HookInput(); h.event = "PreCompact"; h.trigger = "auto"; return h }()) == "auto-compacting")
+    check("modeBadge maps plan, hides default", modeBadge("plan") == "plan" && modeBadge("default") == nil)
 
     // 6) Theme palettes resolve and are swappable.
     check("palette lookup falls back", Palette.byID("nope").id == "claude" && Palette.byID("midnight").id == "midnight")
