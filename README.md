@@ -1,4 +1,5 @@
-<h1 align="center">✳ Claude Pet</h1>
+<p align="center"><img src="docs/icon.png" width="120" alt="Claude Pet icon"></p>
+<h1 align="center">Claude Pet</h1>
 
 <p align="center">
   A floating desktop companion for <b>Claude Code</b> that mirrors your session
@@ -10,9 +11,8 @@
   <img src="docs/pet_running.png" width="150" alt="working">
   <img src="docs/pet_waiting.png" width="150" alt="needs you">
   <img src="docs/pet_review.png" width="150" alt="ready">
-  <img src="docs/demo_codex_pet.png" width="150" alt="a Codex pet loaded">
 </p>
-<p align="center"><sub>Default built-in pet (left 3) · any codex-pets.net sprite loaded (right)</sub></p>
+<p align="center"><sub>The built-in mascot (original art) reacting to session state. Load any Codex pet to replace it.</sub></p>
 
 ---
 

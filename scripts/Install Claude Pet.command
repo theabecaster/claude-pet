@@ -17,8 +17,8 @@ xattr -dr com.apple.quarantine "/Applications/ClaudePet.app" 2>/dev/null || true
 open "/Applications/ClaudePet.app"
 
 echo ""
-echo "✳ Done! A little Claude pet now lives in the corner of your screen."
+echo "🐾 Done! A little Claude pet now lives in the corner of your screen."
 echo "  It reacts to Claude Code in real time."
-echo "  Use the ✳ icon in your menu bar to show/hide it or load a custom sprite."
+echo "  Use the 🐾 icon in your menu bar to show/hide it or load a custom sprite."
 echo ""
 read -n 1 -s -r -p "Press any key to close this window."

@@ -95,6 +95,86 @@ func loadActiveSprite() -> NSImage? {
     return nil
 }
 
+// MARK: - Original mascot ("terminal buddy")
+// Fully drawn in code — no external/third-party art, no resemblance to any
+// existing logo or character. A rounded terminal-creature with expressive eyes
+// and a cursor mouth. Used for the default pet and the app icon.
+
+func drawBuddy(in rect: NSRect, accent: NSColor, anim: String, frame: Int) {
+    let body = NSBezierPath(roundedRect: rect, xRadius: rect.width * 0.32, yRadius: rect.height * 0.32)
+    Theme.termBG.setFill(); body.fill()
+    accent.setStroke(); body.lineWidth = max(2, rect.width * 0.05); body.stroke()
+
+    let eyeR = rect.width * 0.12
+    let eyeDX = rect.width * 0.19
+    let eyeY = rect.midY + rect.height * 0.06
+    let cx = rect.midX
+    let blink = (frame % 7 == 6)
+    let mode: String = {
+        switch anim {
+        case "review", "jumping": return "happy"
+        case "waiting": return "wow"
+        case "failed": return "dead"
+        case "running", "running-right", "running-left": return "busy"
+        default: return "idle"
+        }
+    }()
+
+    func eye(_ ex: CGFloat) {
+        let c = NSPoint(x: ex, y: eyeY)
+        if mode == "dead" {
+            let p = NSBezierPath(); p.lineWidth = max(2, rect.width * 0.035); p.lineCapStyle = .round
+            let r = eyeR * 0.8
+            p.move(to: NSPoint(x: c.x - r, y: c.y - r)); p.line(to: NSPoint(x: c.x + r, y: c.y + r))
+            p.move(to: NSPoint(x: c.x - r, y: c.y + r)); p.line(to: NSPoint(x: c.x + r, y: c.y - r))
+            Theme.red.setStroke(); p.stroke(); return
+        }
+        if blink || mode == "happy" {
+            let p = NSBezierPath(); p.lineWidth = max(2, rect.width * 0.035); p.lineCapStyle = .round
+            let r = eyeR
+            p.move(to: NSPoint(x: c.x - r, y: c.y))
+            p.curve(to: NSPoint(x: c.x + r, y: c.y),
+                    controlPoint1: NSPoint(x: c.x - r * 0.3, y: c.y + r * 0.95),
+                    controlPoint2: NSPoint(x: c.x + r * 0.3, y: c.y + r * 0.95))
+            NSColor.white.setStroke(); p.stroke(); return
+        }
+        let er = (mode == "wow") ? eyeR * 1.15 : eyeR
+        NSColor.white.setFill()
+        NSBezierPath(ovalIn: NSRect(x: c.x - er, y: c.y - er, width: er * 2, height: er * 2)).fill()
+        let pr = er * 0.5
+        let dy = (mode == "busy") ? -er * 0.3 : 0
+        NSColor(white: 0.1, alpha: 1).setFill()
+        NSBezierPath(ovalIn: NSRect(x: c.x - pr, y: c.y - pr + dy, width: pr * 2, height: pr * 2)).fill()
+    }
+    eye(cx - eyeDX); eye(cx + eyeDX)
+
+    let my = rect.midY - rect.height * 0.20
+    let mw = rect.width * 0.16
+    let mouth = NSBezierPath(); mouth.lineWidth = max(2, rect.width * 0.04); mouth.lineCapStyle = .round
+    switch mode {
+    case "happy":
+        mouth.move(to: NSPoint(x: cx - mw, y: my + rect.height * 0.02))
+        mouth.curve(to: NSPoint(x: cx + mw, y: my + rect.height * 0.02),
+                    controlPoint1: NSPoint(x: cx - mw * 0.3, y: my - rect.height * 0.05),
+                    controlPoint2: NSPoint(x: cx + mw * 0.3, y: my - rect.height * 0.05))
+        accent.setStroke(); mouth.stroke()
+    case "wow":
+        let o = NSBezierPath(ovalIn: NSRect(x: cx - mw * 0.4, y: my - mw * 0.4, width: mw * 0.8, height: mw * 0.8))
+        accent.setStroke(); o.lineWidth = max(2, rect.width * 0.035); o.stroke()
+    case "dead":
+        mouth.move(to: NSPoint(x: cx - mw, y: my)); mouth.line(to: NSPoint(x: cx + mw, y: my))
+        Theme.red.setStroke(); mouth.stroke()
+    case "busy":
+        if frame % 2 == 0 {
+            accent.setFill()
+            NSBezierPath(rect: NSRect(x: cx - mw * 0.5, y: my - mw * 0.25, width: mw, height: mw * 0.5)).fill()
+        }
+    default:
+        mouth.move(to: NSPoint(x: cx - mw * 0.7, y: my)); mouth.line(to: NSPoint(x: cx + mw * 0.7, y: my))
+        accent.setStroke(); mouth.stroke()
+    }
+}
+
 // MARK: - View
 
 final class PetView: NSView {
@@ -157,26 +237,19 @@ final class PetView: NSView {
         if let label = bubbleLabel { drawBubble(label, dot: bubbleDot, above: dest) }
     }
 
-    // Built-in fallback pet: a dark terminal token with the Claude coral "✳".
+    private func stateAccent() -> NSColor {
+        switch anim {
+        case "running", "running-right", "running-left", "jumping", "review": return Theme.green
+        case "waiting", "failed": return Theme.red
+        default: return Theme.coral
+        }
+    }
+
+    // Built-in default pet: our original code-drawn terminal buddy.
     private func drawPlaceholder(in rect: NSRect) {
-        let accent: NSColor = {
-            switch anim {
-            case "running", "running-right", "running-left", "jumping", "review": return Theme.green
-            case "waiting", "failed": return Theme.red
-            default: return Theme.coral
-            }
-        }()
-        let bounce = CGFloat((frameIndex % 2) * 5)
+        let bounce = CGFloat((frameIndex % 2) * 4)
         var r = rect; r.origin.y += bounce
-        let path = NSBezierPath(roundedRect: r, xRadius: r.width * 0.28, yRadius: r.height * 0.28)
-        Theme.termBG.setFill(); path.fill()
-        accent.setStroke(); path.lineWidth = 2.5; path.stroke()
-        let s = "✳" as NSString
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: rect.width * 0.55, weight: .bold),
-            .foregroundColor: Theme.coral]
-        let sz = s.size(withAttributes: attrs)
-        s.draw(at: NSPoint(x: r.midX - sz.width / 2, y: r.midY - sz.height / 2), withAttributes: attrs)
+        drawBuddy(in: r, accent: stateAccent(), anim: anim, frame: frameIndex)
     }
 
     // Terminal-style status pill: dark bg, coral hairline border, mono label, status dot.
@@ -213,7 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setupMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "✳"
+        statusItem.button?.title = "🐾"
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Show / Hide Pet", action: #selector(toggleVisibility), keyEquivalent: "p"))
         menu.addItem(.separator())
@@ -380,7 +453,7 @@ func installHooks() {
     root["hooks"] = hooks
     if let out = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
         try? out.write(to: settingsURL)
-        print("✳ Claude Pet hooks installed (\(HOOK_WIRING.count) events) → \(settingsURL.path)")
+        print("🐾 Claude Pet hooks installed (\(HOOK_WIRING.count) events) → \(settingsURL.path)")
     }
 }
 
@@ -400,7 +473,38 @@ func uninstallHooks() {
     root["hooks"] = hooks
     if let out = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
         try? out.write(to: settingsURL)
-        print("✳ Claude Pet hooks removed.")
+        print("🐾 Claude Pet hooks removed.")
+    }
+}
+
+// Draws the app icon: a Claude-coral squircle with a white sunburst mark.
+func renderIcon(to path: String, size: Int = 1024) {
+    _ = NSApplication.shared
+    let s = CGFloat(size)
+    let img = NSImage(size: NSSize(width: s, height: s))
+    img.lockFocus()
+    NSGraphicsContext.current?.imageInterpolation = .high
+
+    let inset = s * 0.055
+    let rect = NSRect(x: inset, y: inset, width: s - 2 * inset, height: s - 2 * inset)
+    let corner = rect.width * 0.2237   // Apple icon-grid corner ratio
+    let bg = NSBezierPath(roundedRect: rect, xRadius: corner, yRadius: corner)
+    let grad = NSGradient(colors: [
+        NSColor(red: 0.93, green: 0.56, blue: 0.42, alpha: 1.0),
+        Theme.coral,
+        NSColor(red: 0.78, green: 0.40, blue: 0.28, alpha: 1.0)])
+    grad?.draw(in: bg, angle: -90)
+
+    // Our original mascot, smiling, centered.
+    let side = rect.width * 0.58
+    let bRect = NSRect(x: rect.midX - side / 2, y: rect.midY - side / 2, width: side, height: side)
+    drawBuddy(in: bRect, accent: .white, anim: "review", frame: 0)
+
+    img.unlockFocus()
+    if let tiff = img.tiffRepresentation, let bmp = NSBitmapImageRep(data: tiff),
+       let png = bmp.representation(using: .png, properties: [:]) {
+        try? png.write(to: URL(fileURLWithPath: path))
+        print("icon -> \(path)")
     }
 }
 
@@ -437,6 +541,8 @@ if args.count >= 2 {
     case "--render":
         renderState(args.count >= 3 ? args[2] : "running",
                     to: args.count >= 4 ? args[3] : "/tmp/pet.png"); exit(0)
+    case "--make-icon":
+        renderIcon(to: args.count >= 3 ? args[2] : "/tmp/AppIcon.png"); exit(0)
     default: break
     }
 }
