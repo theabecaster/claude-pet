@@ -2,9 +2,8 @@
 # (Re)applies GitHub branch-protection rulesets for `main` and `dev`, idempotently.
 #
 # Each ruleset:
-#   - requires a pull request before merging (0 required approvals — a PR is
-#     mandatory, but the maintainer can self-merge; bump REQUIRED_APPROVALS to
-#     force review on collaborator PRs),
+#   - requires a pull request before merging with 1 approval (override with
+#     REQUIRED_APPROVALS=0 to make a PR mandatory but self-mergeable),
 #   - requires the `build` status check to pass,
 #   - blocks force-pushes and branch deletion,
 #   - grants an `always` bypass to the repository **admin** role (actor_id 5),
@@ -17,7 +16,7 @@
 set -euo pipefail
 
 REPO="${REPO:-theabecaster/claude-pet}"
-REQUIRED_APPROVALS="${REQUIRED_APPROVALS:-0}"
+REQUIRED_APPROVALS="${REQUIRED_APPROVALS:-1}"
 BRANCHES=(main dev)
 
 ruleset_json() {

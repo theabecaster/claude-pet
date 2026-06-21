@@ -247,9 +247,9 @@ rm -rf /Applications/ClaudePet.app && cp -R dist/ClaudePet.app /Applications/Cla
 
 `main` and `dev` each have a ruleset requiring a PR, the `build` status check, and blocking
 force-push + deletion — with an `always` **bypass for the repo admin role** so the maintainer
-can push directly. They are defined and re-applied by **`scripts/setup-branch-protection.sh`**
-(idempotent; re-run it after changing the rules, or set `REQUIRED_APPROVALS=1` to force review on
-collaborator PRs). To inspect/modify by hand: `gh api repos/theabecaster/claude-pet/rulesets`
+can push directly. PRs need **1 approval** to merge (the admin bypass exempts the maintainer). They are defined and
+re-applied by **`scripts/setup-branch-protection.sh`** (idempotent; re-run after changing the
+rules, or set `REQUIRED_APPROVALS=0` to make PRs self-mergeable). To inspect/modify by hand: `gh api repos/theabecaster/claude-pet/rulesets`
 (list), `…/rulesets/<id>` (GET/PUT/DELETE).
 
 ### Keeping README & CLAUDE.md current (do this as things change)

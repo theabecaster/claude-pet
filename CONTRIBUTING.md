@@ -56,7 +56,7 @@ bash scripts/make-app.sh 1.0.0     # -> dist/ClaudePet.app + installers
 4. Use Conventional Commit messages (see above) so versioning works.
 5. Describe what you changed and why. Screenshots help for visual changes.
 
-CI (`build`) must pass before a PR can merge.
+A PR needs **1 approval** and a green `build` check before it can merge.
 
 ## Releases
 
