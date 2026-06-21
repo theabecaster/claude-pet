@@ -60,9 +60,12 @@ func loadFrames() -> Frames {
 
 struct PetState: Codable { var state = "idle"; var cwd: String?; var transcript: String?; var detail: String? }
 
-// Read the session's AI-generated title from its transcript (JSONL). Titles are
-// appended as records of type "ai-title"; the latest near the end wins. Only the
-// file tail is scanned so this stays cheap even for large transcripts.
+// Read the session's title from its transcript (JSONL). Two kinds of records
+// carry a title: "ai-title" (auto-generated, field "aiTitle") and "custom-title"
+// (the user's manual rename, field "customTitle"). For each kind the latest near
+// the end wins; a manual rename always takes precedence over the AI title, since
+// Claude Code stops auto-titling once the user renames a session. Only the file
+// tail is scanned so this stays cheap even for large transcripts.
 func readAITitle(_ path: String) -> String? {
     guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
     defer { try? fh.close() }
@@ -70,13 +73,16 @@ func readAITitle(_ path: String) -> String? {
     let chunk = 65536
     if size > chunk { try? fh.seek(toOffset: UInt64(size - chunk)) }
     guard let data = try? fh.readToEnd(), let text = String(data: data, encoding: .utf8) else { return nil }
-    var title: String?
-    for line in text.split(separator: "\n") where line.contains("\"type\":\"ai-title\"") {
+    var aiTitle: String?, customTitle: String?
+    for line in text.split(separator: "\n")
+        where line.contains("\"type\":\"ai-title\"") || line.contains("\"type\":\"custom-title\"") {
         if let d = line.data(using: .utf8),
-           let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-           let t = o["aiTitle"] as? String, !t.isEmpty { title = t }
+           let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+            if let t = o["customTitle"] as? String, !t.isEmpty { customTitle = t }
+            else if let t = o["aiTitle"] as? String, !t.isEmpty { aiTitle = t }
+        }
     }
-    return title
+    return customTitle ?? aiTitle
 }
 
 // MARK: - State model

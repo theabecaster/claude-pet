@@ -100,9 +100,11 @@ entirely in code** (no third-party art; also used for the app icon). Sheet layou
 come from `Frames` (defaults overridable via `~/.claude-pet/frames.json`; see
 `frames.json.example`). The status pill and session caption stack upward above the pet.
 
-Session labels prefer Claude Code's AI-generated session title, parsed by `readAITitle()`
-from the tail of the transcript JSONL (records with `"type":"ai-title"`, latest wins), and
-fall back to the project folder name (`label()`). The selected pet's caption (shown for single
+Session labels come from the transcript JSONL, parsed by `readAITitle()` from its tail: a
+user's manual rename (`"type":"custom-title"`, field `customTitle`) wins over Claude Code's
+AI-generated title (`"type":"ai-title"`, field `aiTitle`); for each kind the latest wins.
+They fall back to the project folder name (`label()`). Renames propagate live because
+`sessionTitle()` re-reads when the transcript's mtime changes. The selected pet's caption (shown for single
 *and* multi) wraps to two lines via `PetView.wrapCaption`; list rows single-line truncate.
 
 ### Why the stdin/process handling looks defensive

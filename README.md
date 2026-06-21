@@ -64,9 +64,10 @@ then settles down again once handled. `ready` gives a soft positive nudge,
 Run several Claude Code sessions at once and you get **one cohesive stack**, not a
 mess of windows. The **selected** session shows as the big pet in the corner; all
 your sessions appear in a clean list above it, in a **stable order that never
-shuffles on its own**. Each row shows the session's **AI-generated title** (the
-same name Claude Code shows in its session list; falls back to the project
-folder) and a color-coded status, so you can see at a glance which one needs you.
+shuffles on its own**. Each row shows the session's **title** — the same name
+Claude Code shows in its session list, so renaming a session there renames its
+pet too (falls back to the AI-generated title, then the project folder) — and a
+color-coded status, so you can see at a glance which one needs you.
 
 You're in control:
 
