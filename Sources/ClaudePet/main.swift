@@ -58,7 +58,7 @@ func loadFrames() -> Frames {
     return Frames()
 }
 
-struct PetState: Codable { var state = "idle"; var cwd: String?; var transcript: String?; var detail: String? }
+struct PetState: Codable { var state = "idle"; var cwd: String?; var transcript: String?; var detail: String?; var cleared: Bool? }
 
 // Read the session's title from its transcript (JSONL). Two kinds of records
 // carry a title: "ai-title" (auto-generated, field "aiTitle") and "custom-title"
@@ -66,7 +66,14 @@ struct PetState: Codable { var state = "idle"; var cwd: String?; var transcript:
 // the end wins; a manual rename always takes precedence over the AI title, since
 // Claude Code stops auto-titling once the user renames a session. Only the file
 // tail is scanned so this stays cheap even for large transcripts.
-func readAITitle(_ path: String) -> String? {
+//
+// `ignoreCustom` drops manual-rename records. On `/clear` Claude Code keeps the
+// same session_id and re-asserts the pre-clear custom title into the new
+// transcript (repeatedly, with no timestamp to distinguish carried-over from
+// fresh), so a cleared session would otherwise keep showing its old name. For
+// those we ignore custom titles entirely and fall back to a fresh ai-title or
+// the project folder, which is what "the name resets on clear" means in practice.
+func readAITitle(_ path: String, ignoreCustom: Bool = false) -> String? {
     guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
     defer { try? fh.close() }
     let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int ?? 0
@@ -82,6 +89,7 @@ func readAITitle(_ path: String) -> String? {
             else if let t = o["aiTitle"] as? String, !t.isEmpty { aiTitle = t }
         }
     }
+    if ignoreCustom { return aiTitle }
     return customTitle ?? aiTitle
 }
 
@@ -140,9 +148,9 @@ func loadActiveSprite() -> NSImage? {
 // Motion is keyed to attention: calm when working/idle, attention-grabbing when it
 // needs you. `phase` is continuous seconds for smooth, paced motion.
 
-func drawBuddy(in rect: NSRect, accent: NSColor, anim: String, phase: Double) {
+func drawBuddy(in rect: NSRect, accent: NSColor, anim: String, phase: Double, bodyFill: NSColor? = nil) {
     let body = NSBezierPath(roundedRect: rect, xRadius: rect.width * 0.32, yRadius: rect.height * 0.32)
-    Theme.termBG.setFill(); body.fill()
+    (bodyFill ?? Theme.termBG).setFill(); body.fill()
     accent.setStroke(); body.lineWidth = max(2, rect.width * 0.05); body.stroke()
 
     let eyeR = rect.width * 0.12, eyeDX = rect.width * 0.19
@@ -212,6 +220,39 @@ func drawBuddy(in rect: NSRect, accent: NSColor, anim: String, phase: Double) {
         mouth.move(to: NSPoint(x: cx - mw * 0.7, y: my)); mouth.line(to: NSPoint(x: cx + mw * 0.7, y: my))
         accent.setStroke(); mouth.stroke()
     }
+}
+
+// A tiny version of the current pet for the menu bar, so the app stays usable when
+// the overlay is hidden. Colored by state (not a dark template) so it pops on both
+// light and dark menu bars and conveys session state at a glance. Falls back to a
+// solid accent-filled mascot when no custom sprite is loaded.
+func menuBarImage(state: String, sprite: NSImage?, cfg: Frames) -> NSImage {
+    let side: CGFloat = 18
+    let img = NSImage(size: NSSize(width: side, height: side))
+    img.lockFocus()
+    let rect = NSRect(x: 0, y: 0, width: side, height: side)
+    if let sheet = sprite {
+        NSGraphicsContext.current?.imageInterpolation = .none
+        let fw = CGFloat(cfg.frameWidth), fh = CGFloat(cfg.frameHeight)
+        let anim = describe(state).anim
+        let n = ((cfg.animations ?? codexAnimations())[anim] ?? [0]).first ?? 0
+        let perRow = max(1, Int(sheet.size.width.rounded()) / cfg.frameWidth)
+        let col = n % perRow, row = n / perRow
+        let srcY = sheet.size.height - CGFloat(row + 1) * fh
+        let s = min(side / fw, side / fh)
+        let dw = fw * s, dh = fh * s
+        let dest = NSRect(x: (side - dw) / 2, y: (side - dh) / 2, width: dw, height: dh)
+        sheet.draw(in: dest, from: NSRect(x: CGFloat(col) * fw, y: srcY, width: fw, height: fh),
+                   operation: .sourceOver, fraction: 1.0)
+    } else {
+        NSGraphicsContext.current?.imageInterpolation = .high
+        let accent = accentFor(state)
+        drawBuddy(in: rect.insetBy(dx: 1.5, dy: 1.5), accent: .white, anim: describe(state).anim,
+                  phase: 0, bodyFill: accent)
+    }
+    img.unlockFocus()
+    img.isTemplate = false        // keep state color; do NOT let the system monochrome it
+    return img
 }
 
 // MARK: - PetView (the prominent / primary pet)
@@ -564,11 +605,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var order: [String] = []               // stable display order of session ids
     var selectedID: String?
     var appliedKey = ""
+    var menuIconKey = ""
     var titleCache: [String: (mtime: Date?, title: String?)] = [:]
 
     func setupMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "🐾"
+        updateMenuBarIcon("idle")
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Show / Hide", action: #selector(toggleVisibility), keyEquivalent: "p"))
         menu.addItem(.separator())
@@ -577,6 +619,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Claude Pet", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
+    }
+
+    // Reflect the selected session's state in the menu bar (state in the key so a
+    // sprite swap or state change re-renders, but steady state is a no-op).
+    func updateMenuBarIcon(_ state: String) {
+        let sprite = stack?.primary.sprite
+        let key = state + "|" + (sprite != nil ? "sprite" : "buddy")
+        guard key != menuIconKey else { return }
+        menuIconKey = key
+        statusItem.button?.image = menuBarImage(state: state, sprite: sprite, cfg: stack?.primary.cfg ?? Frames())
     }
 
     @objc func toggleVisibility() {
@@ -612,6 +664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func reloadSprite() {
         stack.primary.cfg = loadFrames(); stack.primary.sprite = loadActiveSprite(); stack.primary.needsDisplay = true
+        menuIconKey = ""; updateMenuBarIcon(stack.primary.anim)   // re-render the menu bar from the new sprite
     }
     @objc func quit() { NSApp.terminate(nil) }
 
@@ -673,7 +726,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func sessionTitle(_ id: String, _ st: PetState) -> String? {
         guard let tp = st.transcript else { return nil }
         let m = (try? FileManager.default.attributesOfItem(atPath: tp))?[.modificationDate] as? Date
-        if titleCache[id]?.mtime != m { titleCache[id] = (m, readAITitle(tp)) }
+        if titleCache[id]?.mtime != m { titleCache[id] = (m, readAITitle(tp, ignoreCustom: st.cleared == true)) }
         return titleCache[id]?.title
     }
     private func folderName(_ st: PetState) -> String? { st.cwd.map { URL(fileURLWithPath: $0).lastPathComponent } }
@@ -701,7 +754,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let newIDs = live.keys.filter { !order.contains($0) }.sorted { live[$0]!.mtime < live[$1]!.mtime }
         order.append(contentsOf: newIDs)
 
-        if order.isEmpty { window.orderOut(nil); appliedKey = ""; selectedID = nil; return }
+        if order.isEmpty { window.orderOut(nil); appliedKey = ""; selectedID = nil; updateMenuBarIcon("idle"); return }
         if selectedID == nil || live[selectedID!] == nil { selectedID = order.first }
 
         let sel = live[selectedID!]!
@@ -710,6 +763,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stack.primary.caption = label(selectedID!, sel.st)     // shown for single AND multi (wraps to 2 lines)
         let key = selectedID! + "|" + sel.st.state
         if appliedKey != key { appliedKey = key; stack.primary.setState(sel.st.state) }
+        updateMenuBarIcon(sel.st.state)
 
         // Resize bottom-anchored (the corner stays put; the list grows upward).
         let h = stack.desiredHeight()
@@ -745,8 +799,8 @@ func selfExecPath() -> String { Bundle.main.executablePath ?? CommandLine.argume
 // Claude Code delivers event JSON on stdin. Read it without ever blocking the
 // session: every read is gated by poll with a hard time cap, so a hook can never
 // hang (e.g. if the writer keeps the pipe open).
-func readHookInput() -> (session: String, cwd: String?, transcript: String?) {
-    var session = "default"; var cwd: String? = nil; var transcript: String? = nil
+func readHookInput() -> (session: String, cwd: String?, transcript: String?, source: String?) {
+    var session = "default"; var cwd: String? = nil; var transcript: String? = nil; var source: String? = nil
     let fd: Int32 = 0
     var data = Data()
     var buf = [UInt8](repeating: 0, count: 4096)
@@ -762,8 +816,9 @@ func readHookInput() -> (session: String, cwd: String?, transcript: String?) {
         if let s = obj["session_id"] as? String, !s.isEmpty { session = s }
         cwd = obj["cwd"] as? String
         transcript = obj["transcript_path"] as? String
+        source = obj["source"] as? String      // SessionStart only: "startup"|"resume"|"clear"|"compact"
     }
-    return (session, cwd, transcript)
+    return (session, cwd, transcript, source)
 }
 
 func writeState(_ state: String) {
@@ -774,6 +829,12 @@ func writeState(_ state: String) {
     var obj: [String: Any] = ["state": state]
     if let c = info.cwd { obj["cwd"] = c }
     if let t = info.transcript { obj["transcript"] = t }
+    // A `/clear` reuses the session_id but starts a fresh conversation; sticky
+    // once set so later state writes (running, waiting…) don't drop it. The flag
+    // dies with the session file on SessionEnd ("off").
+    let wasCleared = (try? Data(contentsOf: file))
+        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["cleared"] as? Bool ?? false
+    if info.source == "clear" || wasCleared { obj["cleared"] = true }
     if let data = try? JSONSerialization.data(withJSONObject: obj) { try? data.write(to: file) }
 }
 
@@ -983,6 +1044,38 @@ func renderState(_ state: String, to path: String) {
     }
 }
 
+// Preview the menu-bar icon for each state on both a light and a dark bar so its
+// visibility can be eyeballed (the whole point: legible in dark mode).
+func renderMenuBar(to path: String) {
+    _ = NSApplication.shared
+    let cfg = loadFrames(); let sprite = loadActiveSprite()
+    let states = ["idle", "running", "waiting", "review", "failed", "waving"]
+    let cell: CGFloat = 18, pad: CGFloat = 8, scale: CGFloat = 4
+    let cols = states.count
+    let w = (CGFloat(cols) * (cell + pad) + pad) * scale
+    let h = (cell + pad) * 2 * scale
+    let img = NSImage(size: NSSize(width: w, height: h))
+    img.lockFocus()
+    NSGraphicsContext.current?.imageInterpolation = .none
+    // top row: dark bar (dark mode), bottom row: light bar (light mode)
+    NSColor(white: 0.13, alpha: 1).setFill(); NSRect(x: 0, y: h / 2, width: w, height: h / 2).fill()
+    NSColor(white: 0.96, alpha: 1).setFill(); NSRect(x: 0, y: 0, width: w, height: h / 2).fill()
+    for (i, s) in states.enumerated() {
+        let icon = menuBarImage(state: s, sprite: sprite, cfg: cfg)
+        let x = (pad + CGFloat(i) * (cell + pad)) * scale
+        for (band, _) in [(h / 2, "dark"), (CGFloat(0), "light")].enumerated() {
+            let y = (band == 0 ? h / 2 : 0) + (pad / 2) * scale
+            icon.draw(in: NSRect(x: x, y: y, width: cell * scale, height: cell * scale),
+                      from: .zero, operation: .sourceOver, fraction: 1.0)
+        }
+    }
+    img.unlockFocus()
+    if let tiff = img.tiffRepresentation, let bmp = NSBitmapImageRep(data: tiff),
+       let png = bmp.representation(using: .png, properties: [:]) {
+        try? png.write(to: URL(fileURLWithPath: path)); print("rendered menubar -> \(path)")
+    }
+}
+
 // MARK: - Entry point
 
 let args = CommandLine.arguments
@@ -998,6 +1091,8 @@ if args.count >= 2 {
         renderIcon(to: args.count >= 3 ? args[2] : "/tmp/AppIcon.png"); exit(0)
     case "--render-stack":
         renderStack(to: args.count >= 3 ? args[2] : "/tmp/stack.png"); exit(0)
+    case "--render-menubar":
+        renderMenuBar(to: args.count >= 3 ? args[2] : "/tmp/menubar.png"); exit(0)
     case "--selftest":
         exit(selfTest() ? 0 : 1)
     case "--aititle":

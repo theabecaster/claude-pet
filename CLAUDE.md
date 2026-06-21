@@ -17,6 +17,7 @@ swift build -c release                                  # build (the only build 
 .build/release/ClaudePet --state waiting                # simulate a hook firing
 .build/release/ClaudePet --render running /tmp/p.png    # offscreen PNG preview of a state
 .build/release/ClaudePet --render-stack /tmp/s.png      # offscreen preview of the multi-session stack
+.build/release/ClaudePet --render-menubar /tmp/m.png   # preview the menu-bar icon (each state, dark+light bar)
 .build/release/ClaudePet --selftest                    # drive real NSEvent click/drag through handlers (CI gate)
 .build/release/ClaudePet --make-icon /tmp/icon.png      # render the app icon
 .build/release/ClaudePet --aititle /path/to/transcript.jsonl   # debug AI-title parsing
@@ -38,8 +39,8 @@ interaction handlers or the `--state` / hook-routing path. CI also requires a cl
 The binary is **dual-mode**, dispatched by `argv[1]` at the bottom of `main.swift`:
 
 - **CLI mode** (`--state`, `--install-hooks`, `--uninstall-hooks`, `--render`, `--render-stack`,
-  `--selftest`, `--make-icon`, `--aititle`): does its work and `exit(0)` — never starts the GUI
-  event loop.
+  `--render-menubar`, `--selftest`, `--make-icon`, `--aititle`): does its work and `exit(0)` —
+  never starts the GUI event loop.
 - **GUI mode** (no args): acquires a singleton lock, runs the `NSApplication` overlay.
 
 ### The data flow (no polling of Claude, no network)
@@ -100,12 +101,30 @@ entirely in code** (no third-party art; also used for the app icon). Sheet layou
 come from `Frames` (defaults overridable via `~/.claude-pet/frames.json`; see
 `frames.json.example`). The status pill and session caption stack upward above the pet.
 
+The **menu-bar icon** is a tiny version of the same pet (`menuBarImage()`), reflecting the
+selected session's state so the app stays usable when the overlay is hidden. It's colored by
+state (`accentFor`) rather than a dark template — a custom sprite blits its first frame for the
+state; the default mascot is drawn as a solid accent-filled `drawBuddy()` (via the `bodyFill`
+param) so it stays legible on both light and dark menu bars. `AppDelegate.updateMenuBarIcon()`
+re-renders only when the state or sprite changes (keyed by `menuIconKey`); `sync()` drives it
+and `reloadSprite()` invalidates it.
+
 Session labels come from the transcript JSONL, parsed by `readAITitle()` from its tail: a
 user's manual rename (`"type":"custom-title"`, field `customTitle`) wins over Claude Code's
 AI-generated title (`"type":"ai-title"`, field `aiTitle`); for each kind the latest wins.
 They fall back to the project folder name (`label()`). Renames propagate live because
 `sessionTitle()` re-reads when the transcript's mtime changes. The selected pet's caption (shown for single
 *and* multi) wraps to two lines via `PetView.wrapCaption`; list rows single-line truncate.
+
+**`/clear` resets the name.** A clear reuses the same `session_id` but starts a fresh
+conversation, and Claude Code re-asserts the *pre-clear* custom title into the new transcript
+(repeatedly, with no timestamp to tell carried-over from fresh). So `writeState()` records a
+sticky `cleared` flag on the session file when the `SessionStart` hook's `source == "clear"`
+(read by `readHookInput()`), and `sessionTitle()` calls `readAITitle(_, ignoreCustom:)` for
+cleared sessions — dropping the manual rename so the name falls back to a fresh `ai-title` or
+the folder name. The flag persists across later state writes and dies with the session file on
+`SessionEnd`. (Tradeoff: a *new* manual rename after a clear is also ignored — acceptable,
+since the records are indistinguishable.)
 
 ### Why the stdin/process handling looks defensive
 
@@ -147,6 +166,25 @@ the bundle's `CFBundleShortVersionString`.
    affected screenshots with `--render <state> docs/pet_<state>.png`, `--render-stack
    docs/stack.png`, and the icon with `make-icon.sh`.
 3. **Package the app:** `bash scripts/make-app.sh X.Y.Z` → `dist/ClaudePet.app` + installers.
+   The script **code-signs** the bundle and runs `codesign --verify` (a hard gate). This is
+   required: the Swift linker leaves the bundle with a partial, inconsistent signature (no
+   `CodeResources`), and a quarantined app in that state is what macOS reports as "damaged —
+   move to Trash". Locally (no `$CODESIGN_IDENTITY`) it signs **ad-hoc**, which downgrades that
+   fatal verdict to the recoverable "unidentified developer → Open Anyway". On a tagged CI
+   build with the Developer ID secrets present (below), it signs with the real identity +
+   hardened runtime + secure timestamp, then **notarizes and staples** — removing the Gatekeeper
+   prompt entirely.
+
+   **Notarization secrets** (GitHub repo → Settings → Secrets and variables → Actions). When
+   absent (PRs, forks, untagged builds) CI falls back to ad-hoc and still passes:
+   - `MACOS_CERTIFICATE` — base64 of the exported **Developer ID Application** cert `.p12`
+     (`base64 -i cert.p12 | pbcopy`).
+   - `MACOS_CERTIFICATE_PWD` — the password set when exporting the `.p12`.
+   - `KEYCHAIN_PWD` — any throwaway string (temp keychain password in CI).
+   - `APPLE_ID` — Apple ID email of the Developer account.
+   - `APPLE_TEAM_ID` — 10-char Team ID (Apple Developer → Membership).
+   - `APPLE_APP_PASSWORD` — an **app-specific password** (appleid.apple.com → Sign-In & Security),
+     not the account password.
 4. **(Optional) dogfood locally** — reinstall the running copy without it hanging:
    ```bash
    pkill -x ClaudePet; sleep 1; pkill -9 -x ClaudePet
@@ -193,5 +231,9 @@ story; CLAUDE.md is the contributor/agent map — don't let either drift.
 
 `Install Claude Pet.command` stops any running copy (kill + wait), copies the app to
 `/Applications`, clears the Gatekeeper quarantine flag, and runs `--install-hooks` (append-only
-into `~/.claude/settings.json`). The app is **unsigned**, so first launch may need
-right-click → Open. (Future improvement: codesign/notarize to remove that step.)
+into `~/.claude/settings.json`). Released builds are **signed with a Developer ID and notarized**
+(when the CI secrets are configured), so they launch with no Gatekeeper prompt. If a build ever
+ships only ad-hoc-signed (secrets missing), launching *outside* the installer hits the
+recoverable "unidentified developer → Open Anyway" prompt — not the fatal "damaged — move to
+Trash" of an unsigned/partially-signed bundle. README's install section steers users to the
+installer and documents the `xattr -dr com.apple.quarantine` escape hatch either way.

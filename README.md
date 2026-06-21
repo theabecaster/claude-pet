@@ -57,6 +57,14 @@ When it **needs you** it gets your attention — a gentle bob and a pulsing halo
 then settles down again once handled. `ready` gives a soft positive nudge,
 `error` a small shake. Calm while you work; loud only when it matters.
 
+## Lives in your menu bar too
+
+The menu-bar icon is a **tiny version of your pet**, colored by the selected
+session's state — coral at rest, green while working/ready, red when it needs you
+or errors. It reads clearly in both light and dark menu bars, so even with the
+overlay hidden (**✳ → Show / Hide**) you can still glance up and see what Claude
+is doing.
+
 ## Multiple sessions — one tidy stack
 
 <p align="center"><img src="docs/stack.png" width="240" alt="Multi-session stack: selected pet with a list of sessions above it"></p>
@@ -86,11 +94,20 @@ pruned). A **single session** is just the one pet with its name shown beneath.
 ### Easy (no terminal — for everyone)
 
 1. Download `ClaudePet-macos.zip` from the [latest release](../../releases/latest).
-2. Unzip, double-click **`Install Claude Pet.command`**.
-   - First run: macOS may warn it's unsigned. Right-click → **Open** → **Open**.
+2. Unzip, then **run `Install Claude Pet.command`** — don't double-click `ClaudePet.app`
+   directly. The installer copies the app to `/Applications`, clears the download
+   quarantine, and wires the hooks for you.
+   - First run macOS asks to confirm a downloaded script: **right-click → Open → Open**.
 3. Restart Claude Code. Your pet appears and reacts.
 
 Control it from the **✳ menu-bar icon**: show/hide, load a pet, reset to default.
+
+> **“ClaudePet.app is damaged / can’t be opened”?** That’s macOS Gatekeeper, not a
+> broken download. Run **`Install Claude Pet.command`** (it clears the flag for you),
+> or clear it manually:
+> ```bash
+> xattr -dr com.apple.quarantine /path/to/ClaudePet.app
+> ```
 
 ### One-click (for technical friends)
 
