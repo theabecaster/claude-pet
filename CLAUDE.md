@@ -18,6 +18,7 @@ swift build -c release                                  # build (the only build 
 .build/release/ClaudePet --render running /tmp/p.png    # offscreen PNG preview of a state
 .build/release/ClaudePet --render-stack /tmp/s.png      # offscreen preview of the multi-session stack
 .build/release/ClaudePet --render-menubar /tmp/m.png   # preview the menu-bar icon (each state, dark+light bar)
+.build/release/ClaudePet --status                      # terminal health + live session report (read-only)
 .build/release/ClaudePet --selftest                    # drive real NSEvent click/drag through handlers + logic checks (CI gate)
 .build/release/ClaudePet --make-icon /tmp/icon.png      # render the app icon
 .build/release/ClaudePet --aititle /path/to/transcript.jsonl   # debug AI-title parsing
@@ -42,8 +43,8 @@ interaction handlers or the `--state` / hook-routing path. CI also requires a cl
 The binary is **dual-mode**, dispatched by `argv[1]` at the bottom of `main.swift`:
 
 - **CLI mode** (`--state`, `--install-hooks`, `--uninstall-hooks`, `--render`, `--render-stack`,
-  `--render-menubar`, `--selftest`, `--make-icon`, `--aititle`, `--meta`): does its work and
-  `exit(0)` — never starts the GUI event loop.
+  `--render-menubar`, `--selftest`, `--status`, `--make-icon`, `--aititle`, `--meta`): does its
+  work and `exit(0)` — never starts the GUI event loop.
 - **GUI mode** (no args): acquires a singleton lock, runs the `NSApplication` overlay.
 
 ### The data flow (no polling of Claude, no network)
@@ -174,6 +175,13 @@ state; the default mascot is drawn as a solid accent-filled `drawBuddy()` (via t
 param) so it stays legible on both light and dark menu bars. `AppDelegate.updateMenuBarIcon()`
 re-renders only when the state or sprite changes (keyed by `menuIconKey`); `sync()` drives it
 and `reloadSprite()` invalidates it.
+
+The **menu-bar dropdown is a live status panel.** `AppDelegate` is the menu's
+`NSMenuDelegate`; `menuNeedsUpdate(_:)` calls `populate(_:)` to rebuild it in place each time
+it opens, so the top **Sessions** section always lists the current sessions (state dot-pet +
+name + what each is doing) — click one (`selectSession`) to make it the big pet (and un-hide
+the overlay). Below it sit the theme submenu, the pref toggles (live checkmarks), and the
+pet/hook/uninstall actions. Toggles repopulate the same menu object via `rebuildMenu()`.
 
 Session labels come from the transcript JSONL, parsed by `readAITitle()` from its tail: a
 user's manual rename (`"type":"custom-title"`, field `customTitle`) wins over Claude Code's

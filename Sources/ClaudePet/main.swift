@@ -683,7 +683,7 @@ final class PetView: NSView {
 // changes when the user drags a row. Click a row to select; scroll to step
 // through; drag the pet (or empty area) to move the whole widget.
 
-struct SessionItem { let id: String; let state: String; let label: String }
+struct SessionItem { let id: String; let state: String; let label: String; var detail: String? = nil }
 
 final class StackView: NSView {
     let primary = PetView(frame: .zero)
@@ -841,7 +841,7 @@ final class StackView: NSView {
 
 // MARK: - App (single stacked overlay)
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var window: NSWindow!
     var stack: StackView!
     var statusItem: NSStatusItem!
@@ -859,13 +859,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func setupMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateMenuBarIcon("idle")
-        rebuildMenu()
+        let menu = NSMenu()
+        menu.delegate = self            // repopulated on open so the session list is always live
+        statusItem.menu = menu
+        populate(menu)
     }
 
-    // Rebuilt (rather than mutated) after each toggle so checkmarks/theme dots stay in
-    // sync with `prefs` without juggling item references.
-    func rebuildMenu() {
-        let menu = NSMenu()
+    // NSMenuDelegate: refresh the (live) session list + checkmarks right before the
+    // menu opens, so the dropdown is a usable status panel even with the overlay hidden.
+    func menuNeedsUpdate(_ menu: NSMenu) { populate(menu) }
+
+    // Kept for the toggle paths; repopulating the existing menu object in place keeps
+    // checkmarks/theme dots in sync with `prefs` without juggling item references.
+    func rebuildMenu() { if let m = statusItem?.menu { populate(m) } }
+
+    private func populate(_ menu: NSMenu) {
+        menu.removeAllItems()
+
+        // Live sessions: pick any to make it the big pet; shows state + what it's doing.
+        if let items = stack?.items, !items.isEmpty {
+            let header = NSMenuItem(title: items.count == 1 ? "Session" : "Sessions (\(items.count))", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for it in items {
+                var title = it.label
+                if let d = it.detail, !d.isEmpty { title += " — " + d } else { title += " — " + shortStatus(it.state) }
+                let mi = NSMenuItem(title: title, action: #selector(selectSession(_:)), keyEquivalent: "")
+                mi.representedObject = it.id
+                mi.state = (it.id == selectedID) ? .on : .off
+                mi.image = menuBarImage(state: it.state, sprite: nil, cfg: Frames())   // tiny state-colored dot-pet
+                menu.addItem(mi)
+            }
+            menu.addItem(.separator())
+        }
+
         menu.addItem(NSMenuItem(title: "Show / Hide", action: #selector(toggleVisibility), keyEquivalent: "p"))
         menu.addItem(.separator())
 
@@ -901,7 +928,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Reinstall Claude Code Hooks", action: #selector(reinstallHooks), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Uninstall Claude Pet…", action: #selector(uninstallSelf), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit Claude Pet", action: #selector(quit), keyEquivalent: "q"))
-        statusItem.menu = menu
+    }
+
+    @objc func selectSession(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        selectedID = id
+        if hidden { hidden = false; window.orderFrontRegardless() }   // bring it back if hidden
+        sync()
     }
 
     private func commitPrefs() { prefs.save(); rebuildMenu() }
@@ -1146,7 +1179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `order` here would snap the grabbed row back and leave dragIndex pointing at
         // the wrong item. Resume rebuilding once the drag commits.
         if !stack.isReordering {
-            stack.items = order.compactMap { id in live[id].map { SessionItem(id: id, state: $0.st.state, label: label(id, $0.st) ?? String(id.prefix(6))) } }
+            stack.items = order.compactMap { id in live[id].map { SessionItem(id: id, state: $0.st.state, label: label(id, $0.st) ?? String(id.prefix(6)), detail: $0.st.detail) } }
         }
         stack.selectedID = selectedID
         stack.primary.caption = label(selectedID!, sel.st)     // shown for single AND multi (wraps to 2 lines)
@@ -1405,6 +1438,40 @@ func uninstallHooks() {
     }
 }
 
+// A terminal-friendly health + session report (reads only; never starts the GUI).
+// Handy for debugging and for users who live in the terminal.
+func statusReport() {
+    let fm = FileManager.default
+    let prefs = Prefs.load()
+    print("Claude Pet — status")
+    print("  overlay running : \(guiAlive() ? "yes" : "no")")
+    print("  hooks wired     : \(hooksPointToSelf() ? "yes (this build)" : "no / different build")")
+    print("  custom sprite   : \(loadActiveSprite() != nil ? "loaded" : "default mascot")")
+    print("  theme           : \(prefs.theme)")
+    print("  alerts          : sound=\(prefs.soundOnAttention) bounce=\(prefs.bounceOnAttention) muted=\(prefs.muted)")
+
+    let files = (try? fm.contentsOfDirectory(at: sessionsDir, includingPropertiesForKeys: nil))?
+        .filter { $0.pathExtension == "json" } ?? []
+    if files.isEmpty { print("  sessions        : none"); return }
+    print("  sessions        : \(files.count)")
+    for f in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+        guard let data = try? Data(contentsOf: f),
+              let st = try? JSONDecoder().decode(PetState.self, from: data) else { continue }
+        let id = f.deletingPathExtension().lastPathComponent
+        let meta = st.transcript.map { readTranscriptMeta($0, ignoreCustom: st.cleared == true) } ?? SessionMeta()
+        let name = meta.title ?? st.cwd.map { URL(fileURLWithPath: $0).lastPathComponent } ?? String(id.prefix(8))
+        var line = "    • \(name)  [\(st.state)]"
+        if let d = st.detail { line += " — \(d)" }
+        print(line)
+        var bits: [String] = []
+        if let m = meta.model { bits.append(shortModel(m)) }
+        if let t = meta.ctxTokens { bits.append(compactTokens(t) + " ctx") }
+        if let b = meta.branch { bits.append(b) }
+        if let badge = modeBadge(st.mode) { bits.append(badge) }
+        if !bits.isEmpty { print("        \(bits.joined(separator: " · "))") }
+    }
+}
+
 func renderIcon(to path: String, size: Int = 1024) {
     _ = NSApplication.shared
     let s = CGFloat(size)
@@ -1638,6 +1705,8 @@ if args.count >= 2 {
         renderMenuBar(to: args.count >= 3 ? args[2] : "/tmp/menubar.png"); exit(0)
     case "--selftest":
         exit(selfTest() ? 0 : 1)
+    case "--status":
+        statusReport(); exit(0)
     case "--aititle":
         print(readAITitle(args.count >= 3 ? args[2] : "") ?? "(no title)"); exit(0)
     case "--meta":

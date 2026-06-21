@@ -111,6 +111,11 @@ or errors. It reads clearly in both light and dark menu bars, so even with the
 overlay hidden (**✳ → Show / Hide**) you can still glance up and see what Claude
 is doing.
 
+Open the **✳ menu** and the top is a **live Sessions list** — every session with
+its state and what it's currently doing. Click one to make it the big pet (and pop
+the overlay back if it was hidden). Prefer the terminal? `ClaudePet --status`
+prints the same health-and-sessions report.
+
 ## Multiple sessions — one tidy stack
 
 <p align="center"><img src="docs/stack.png" width="240" alt="Multi-session stack: selected pet with a list of sessions above it"></p>
