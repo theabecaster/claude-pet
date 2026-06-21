@@ -13,6 +13,7 @@ let framesURL = stateDir.appendingPathComponent("frames.json")
 let settingsURL = home.appendingPathComponent(".claude/settings.json")
 // One state file per Claude Code session -> one session in the stack.
 let sessionsDir = stateDir.appendingPathComponent("sessions")
+let layoutURL = stateDir.appendingPathComponent("layout.json")   // persisted manual order + selection
 func sessionFile(_ id: String) -> URL { sessionsDir.appendingPathComponent(id + ".json") }
 let SESSION_STALE_SECONDS: TimeInterval = 12 * 3600
 // Active sprite sheet — Codex pets ship a WebP, so .webp is preferred.
@@ -604,12 +605,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.setFrameOrigin(NSPoint(x: vf.maxX - stack.W - 16, y: vf.minY + 28))
         }
         stack.layoutContents()
+        loadLayout()
         sync()
 
         Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             self?.stack.primary.advance()
         }
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.sync() }
+    }
+
+    private var lastSavedLayout = ""
+    private func loadLayout() {
+        if let d = try? Data(contentsOf: layoutURL),
+           let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+            order = (o["order"] as? [String]) ?? []
+            selectedID = o["selected"] as? String
+        }
+    }
+    private func saveLayoutIfChanged() {
+        let key = order.joined(separator: ",") + "|" + (selectedID ?? "")
+        guard key != lastSavedLayout else { return }
+        lastSavedLayout = key
+        var obj: [String: Any] = ["order": order]
+        if let s = selectedID { obj["selected"] = s }
+        if let d = try? JSONSerialization.data(withJSONObject: obj) { try? d.write(to: layoutURL) }
     }
 
     private func cycleSelection(_ d: Int) {
@@ -670,6 +689,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stack.layoutContents()
         stack.needsDisplay = true
         if !hidden { window.orderFrontRegardless() }
+        saveLayoutIfChanged()
     }
 }
 
