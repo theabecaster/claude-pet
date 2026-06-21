@@ -60,25 +60,23 @@ then settles down again once handled. `ready` gives a soft positive nudge,
 ## Multiple sessions — one tidy stack
 
 Run several Claude Code sessions at once and you get **one cohesive stack**, not a
-mess of windows. The **most relevant session** is the prominent pet in the
-corner; the rest sit in a clean list above it:
+mess of windows. The **selected** session shows as the big pet in the corner; all
+your sessions appear in a clean list above it, in a **stable order that never
+shuffles on its own**. Each row shows the session's **AI-generated title** (the
+same name Claude Code shows in its session list; falls back to the project
+folder) and a color-coded status, so you can see at a glance which one needs you.
 
-- Auto-sorted by what needs you: **needs-input → error → ready → working → idle**.
-  When any session finishes or needs input, it rises to become the featured pet.
-- Each row shows the session's **AI-generated title** (the same name Claude Code
-  shows in its session list, read from the transcript; falls back to the project
-  folder) and a color-coded status.
+You're in control:
 
-**Go through the stack** to feature whichever you want:
+- **Click a session** to select it — its pet becomes the big one (the row gets a
+  highlighted *selected* state). The order doesn't change.
+- **Scroll** over the widget to step the selection through sessions.
+- **Drag a row** up or down to reorder the list however you like.
+- **Drag the pet** (or empty space) to move the whole widget; it stays where you
+  put it.
 
-- **Scroll** over the widget to flip through sessions.
-- **Click a row** to jump straight to that session.
-- **Click the pet** to release back to auto (a small *pinned* label shows when
-  you're holding a choice).
-
-Pets appear when sessions start and disappear when they end (stale ones are
-pruned). A single session is just one clean, unlabeled pet. Drag the widget
-anywhere; it stays put.
+Sessions appear when they start and disappear when they end (stale ones are
+pruned). A **single session** is just the one pet with its name shown beneath.
 
 ## Install
 

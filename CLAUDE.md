@@ -52,14 +52,16 @@ session under `~/.claude-pet/sessions/`, then `ensureRunning()` auto-launches th
 isn't alive. State `off` deletes the session file (pet disappears).
 
 The GUI is a **single stacked overlay** (one `NSWindow` whose contentView is `StackView`),
-not one window per session. `AppDelegate.sync()` (timer @ 0.25s) reads all session files,
-prunes stale ones (>12h, `SESSION_STALE_SECONDS`), and sorts them by `priority(state)` —
-needs-input > error > ready > working > idle (`naturalOrder`). The most-relevant session is
-the **primary** (a prominent animated `PetView` anchored in the corner); the rest render as a
-clickable list above it inside `StackView`. The window is bottom-anchored so the pet never
-jumps as sessions come and go. Users go through the stack via `StackView`: **scroll** to cycle
-(`onCycle`→`cycle()`), **click a row** to feature a session, **click the pet** to release the
-pin (`onPin`); `pinnedID` overrides auto-promotion and shows a "pinned" label.
+not one window per session. `AppDelegate.sync()` (timer @ 0.25s) reads all session files and
+prunes stale ones (>12h, `SESSION_STALE_SECONDS`). The session list keeps a **stable order**
+(`order: [String]`): existing positions are preserved, new sessions append (oldest-first),
+ended ones drop out — it never reorders on state change. The user-**selected** session
+(`selectedID`) shows as the big animated `PetView` in the corner; all sessions render as a
+list above it inside `StackView`, with the selected row highlighted. Interactions on
+`StackView`: **click a row** → `onSelect` (just changes selection), **scroll** → `onCycle`
+(steps selection), **drag a row** → `onReorder` (manual reorder; mutates `order`), **drag the
+pet/empty area** → moves the window. The window is bottom-anchored so the pet stays put. A
+single session hides the list and just shows the pet with its name.
 
 Animation is **continuous (30fps, `PetView.advance()` driven by a `ticks`/`phase` clock)**,
 not discrete frame stepping. Motion is keyed to an *attention budget* (`PetView.motion()`):

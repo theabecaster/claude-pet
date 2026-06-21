@@ -96,17 +96,6 @@ func describe(_ s: String) -> StateDesc {
     }
 }
 
-// Relevance for stack ordering: the one that needs you (or just finished) rises.
-func priority(_ state: String) -> Int {
-    switch state {
-    case "waiting": return 100
-    case "failed", "error": return 90
-    case "jumping", "done", "review", "ready": return 80
-    case "running", "running-right", "running-left": return 40
-    case "waving": return 30
-    default: return 10
-    }
-}
 func accentFor(_ state: String) -> NSColor {
     switch state {
     case "running", "running-right", "running-left", "jumping", "review", "done", "ready": return Theme.green
@@ -400,34 +389,39 @@ final class PetView: NSView {
     }
 }
 
-// MARK: - StackView (primary pet + clean, scrollable list of the other sessions)
+// MARK: - StackView
+// The selected session's pet shows large in the corner. All sessions appear in a
+// fixed-order list above it (selected one highlighted). Order is STABLE — it only
+// changes when the user drags a row. Click a row to select; scroll to step
+// through; drag the pet (or empty area) to move the whole widget.
 
 struct SessionItem { let id: String; let state: String; let label: String }
 
 final class StackView: NSView {
     let primary = PetView(frame: .zero)
-    var secondaries: [SessionItem] = []
-    var pinned = false
-    var onPin: ((String?) -> Void)?
+    var items: [SessionItem] = []          // ALL sessions, in stable display order
+    var selectedID: String?
+    var onSelect: ((String) -> Void)?
+    var onReorder: (([String]) -> Void)?
     var onCycle: ((Int) -> Void)?
 
     let W: CGFloat = 232, PETH: CGFloat = 158
     let rowH: CGFloat = 26, innerPad: CGFloat = 7, margin: CGFloat = 8, gap: CGFloat = 6
     private var lastMouse = NSPoint.zero
     private var moved: CGFloat = 0
-    private var scrollAccum: CGFloat = 0
+    private var dragIndex: Int? = nil       // row being dragged (reorder)
+    private var windowDrag = false
     private var hoveredRow = -1
+    private var scrollAccum: CGFloat = 0
+
+    var showList: Bool { items.count > 1 }
 
     override init(frame f: NSRect) { super.init(frame: f); addSubview(primary) }
     required init?(coder: NSCoder) { fatalError() }
 
-    func listPanelH() -> CGFloat { secondaries.isEmpty ? 0 : CGFloat(secondaries.count) * rowH + innerPad * 2 }
-    func desiredHeight() -> CGFloat {
-        secondaries.isEmpty ? margin * 2 + PETH : margin * 2 + PETH + gap + listPanelH()
-    }
-    func panelRect() -> NSRect {
-        NSRect(x: margin, y: margin + PETH + gap, width: W - margin * 2, height: listPanelH())
-    }
+    func listPanelH() -> CGFloat { showList ? CGFloat(items.count) * rowH + innerPad * 2 : 0 }
+    func desiredHeight() -> CGFloat { showList ? margin * 2 + PETH + gap + listPanelH() : margin * 2 + PETH }
+    func panelRect() -> NSRect { NSRect(x: margin, y: margin + PETH + gap, width: W - margin * 2, height: listPanelH()) }
     func layoutContents() {
         primary.frame = NSRect(x: 0, y: margin, width: W, height: PETH)   // pet anchored in the corner
         needsDisplay = true
@@ -440,93 +434,104 @@ final class StackView: NSView {
             options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
     }
 
-    private func rowIndex(at p: NSPoint) -> Int {
-        guard !secondaries.isEmpty else { return -1 }
+    private func rowIndex(at p: NSPoint, clamp: Bool = false) -> Int? {
+        guard showList else { return nil }
         let panel = panelRect()
-        guard panel.contains(p) else { return -1 }
-        let i = Int((panel.maxY - innerPad - p.y) / rowH)
-        return (i >= 0 && i < secondaries.count) ? i : -1
+        if !clamp && !panel.contains(p) { return nil }
+        var i = Int((panel.maxY - innerPad - p.y) / rowH)
+        if clamp { i = max(0, min(items.count - 1, i)) }
+        return (i >= 0 && i < items.count) ? i : nil
     }
 
     override func draw(_ r: NSRect) {
         NSColor.clear.set(); r.fill()
-        if pinned && !secondaries.isEmpty {                   // "held" indicator
-            let f = NSFont(name: "Menlo", size: 8) ?? .systemFont(ofSize: 8)
-            let s = "pinned" as NSString
-            let a: [NSAttributedString.Key: Any] = [.font: f, .foregroundColor: Theme.coral]
-            let sz = s.size(withAttributes: a)
-            s.draw(at: NSPoint(x: bounds.width - sz.width - margin, y: bounds.height - sz.height - 2), withAttributes: a)
-        }
-        guard !secondaries.isEmpty else { return }
+        guard showList else { return }
         let panel = panelRect()
         let bg = NSBezierPath(roundedRect: panel, xRadius: 10, yRadius: 10)
         Theme.termBG.setFill(); bg.fill()
         Theme.coral.withAlphaComponent(0.7).setStroke(); bg.lineWidth = 1; bg.stroke()
 
         let font = NSFont(name: "Menlo", size: 10) ?? .systemFont(ofSize: 10)
-        for (i, it) in secondaries.enumerated() {
+        for (i, it) in items.enumerated() {
             let rowY = panel.maxY - innerPad - CGFloat(i + 1) * rowH
             let row = NSRect(x: panel.minX, y: rowY, width: panel.width, height: rowH)
-            if i == hoveredRow {                              // clickable affordance
-                Theme.coral.withAlphaComponent(0.12).setFill()
-                NSBezierPath(roundedRect: row.insetBy(dx: 3, dy: 1), xRadius: 6, yRadius: 6).fill()
+            let inner = row.insetBy(dx: 3, dy: 1)
+            if it.id == selectedID {                            // selected highlight + accent bar
+                Theme.coral.withAlphaComponent(0.22).setFill()
+                NSBezierPath(roundedRect: inner, xRadius: 6, yRadius: 6).fill()
+                Theme.coral.setFill()
+                NSBezierPath(roundedRect: NSRect(x: inner.minX, y: inner.minY, width: 3, height: inner.height),
+                             xRadius: 1.5, yRadius: 1.5).fill()
+            } else if i == hoveredRow {
+                Theme.coral.withAlphaComponent(0.10).setFill()
+                NSBezierPath(roundedRect: inner, xRadius: 6, yRadius: 6).fill()
             }
             let dotR: CGFloat = 4
             accentFor(it.state).setFill()
-            NSBezierPath(ovalIn: NSRect(x: row.minX + 12, y: row.midY - dotR, width: dotR * 2, height: dotR * 2)).fill()
+            NSBezierPath(ovalIn: NSRect(x: row.minX + 14, y: row.midY - dotR, width: dotR * 2, height: dotR * 2)).fill()
             let stStr = shortStatus(it.state) as NSString
             let stAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: accentFor(it.state)]
             let stSize = stStr.size(withAttributes: stAttrs)
             let stX = row.maxX - 12 - stSize.width
             stStr.draw(at: NSPoint(x: stX, y: row.midY - stSize.height / 2), withAttributes: stAttrs)
-            let nameX = row.minX + 26
+            let nameX = row.minX + 28
+            let nmCol = it.id == selectedID ? Theme.termFG : Theme.termFG.withAlphaComponent(0.85)
+            let nmAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: nmCol]
             let nm = truncated(it.label, font: font, maxW: stX - nameX - 8) as NSString
-            let nmAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG]
             nm.draw(at: NSPoint(x: nameX, y: row.midY - nm.size(withAttributes: nmAttrs).height / 2), withAttributes: nmAttrs)
         }
     }
 
     override func mouseMoved(with e: NSEvent) {
-        let i = rowIndex(at: convert(e.locationInWindow, from: nil))
+        let i = rowIndex(at: convert(e.locationInWindow, from: nil)) ?? -1
         if i != hoveredRow { hoveredRow = i; needsDisplay = true }
     }
     override func mouseExited(with e: NSEvent) { if hoveredRow != -1 { hoveredRow = -1; needsDisplay = true } }
 
-    override func mouseDown(with e: NSEvent) { lastMouse = NSEvent.mouseLocation; moved = 0 }
+    override func mouseDown(with e: NSEvent) {
+        lastMouse = NSEvent.mouseLocation; moved = 0
+        if let i = rowIndex(at: convert(e.locationInWindow, from: nil)) { dragIndex = i; windowDrag = false }
+        else { dragIndex = nil; windowDrag = true }            // pet/empty -> move the widget
+    }
     override func mouseDragged(with e: NSEvent) {
         let now = NSEvent.mouseLocation
-        if let win = window {
-            var o = win.frame.origin; o.x += now.x - lastMouse.x; o.y += now.y - lastMouse.y
-            win.setFrameOrigin(o)
+        moved += abs(now.x - lastMouse.x) + abs(now.y - lastMouse.y)
+        if windowDrag {
+            if let win = window { var o = win.frame.origin; o.x += now.x - lastMouse.x; o.y += now.y - lastMouse.y; win.setFrameOrigin(o) }
+        } else if let di = dragIndex, moved > 3 {               // reorder this row live
+            if let t = rowIndex(at: convert(e.locationInWindow, from: nil), clamp: true), t != di {
+                let it = items.remove(at: di); items.insert(it, at: t); dragIndex = t; needsDisplay = true
+            }
         }
-        moved += abs(now.x - lastMouse.x) + abs(now.y - lastMouse.y); lastMouse = now
+        lastMouse = now
     }
     override func mouseUp(with e: NSEvent) {
-        guard moved < 4 else { return }                       // a drag, not a click
-        let p = convert(e.locationInWindow, from: nil)
-        let i = rowIndex(at: p)
-        if i >= 0 { onPin?(secondaries[i].id) }               // jump to that session
-        else { onPin?(nil) }                                  // clicked the pet -> back to auto
+        if let di = dragIndex {
+            if moved > 3 { onReorder?(items.map { $0.id }) }    // committed a manual reorder
+            else { onSelect?(items[di].id) }                   // a click -> select
+        }
+        dragIndex = nil; windowDrag = false
     }
 
-    // Scroll over the widget to flip through sessions.
+    // Scroll over the widget to step the selection through sessions.
     override func scrollWheel(with e: NSEvent) {
+        guard showList else { return }
         scrollAccum += e.scrollingDeltaY
         if scrollAccum > 6 { onCycle?(-1); scrollAccum = 0 }
         else if scrollAccum < -6 { onCycle?(1); scrollAccum = 0 }
     }
 }
 
-// MARK: - App (single stacked overlay for all sessions)
+// MARK: - App (single stacked overlay)
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var stack: StackView!
     var statusItem: NSStatusItem!
     var hidden = false
-    var pinnedID: String?
-    var appliedPrimaryKey = ""
-    var naturalOrder: [String] = []
+    var order: [String] = []               // stable display order of session ids
+    var selectedID: String?
+    var appliedKey = ""
     var titleCache: [String: (mtime: Date?, title: String?)] = [:]
 
     func setupMenu() {
@@ -586,8 +591,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         stack = StackView(frame: NSRect(x: 0, y: 0, width: 232, height: 200))
         stack.primary.cfg = loadFrames(); stack.primary.sprite = loadActiveSprite()
-        stack.onPin = { [weak self] id in self?.pinnedID = id; self?.sync() }
-        stack.onCycle = { [weak self] d in self?.cycle(d) }
+        stack.onSelect = { [weak self] id in self?.selectedID = id; self?.sync() }
+        stack.onReorder = { [weak self] ids in self?.order = ids; self?.sync() }
+        stack.onCycle = { [weak self] d in self?.cycleSelection(d) }
 
         window = NSWindow(contentRect: stack.frame, styleMask: .borderless, backing: .buffered, defer: false)
         window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = false
@@ -606,12 +612,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.sync() }
     }
 
-    private func cycle(_ d: Int) {
-        guard !naturalOrder.isEmpty else { return }
-        let cur = pinnedID ?? naturalOrder[0]
-        let i = naturalOrder.firstIndex(of: cur) ?? 0
-        let n = ((i + d) % naturalOrder.count + naturalOrder.count) % naturalOrder.count
-        pinnedID = naturalOrder[n]
+    private func cycleSelection(_ d: Int) {
+        guard !order.isEmpty else { return }
+        let cur = selectedID ?? order[0]
+        let i = order.firstIndex(of: cur) ?? 0
+        selectedID = order[((i + d) % order.count + order.count) % order.count]
         sync()
     }
 
@@ -622,47 +627,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return titleCache[id]?.title
     }
     private func folderName(_ st: PetState) -> String? { st.cwd.map { URL(fileURLWithPath: $0).lastPathComponent } }
+    private func label(_ id: String, _ st: PetState) -> String? { sessionTitle(id, st) ?? folderName(st) }
 
     private func sync() {
         let fm = FileManager.default
         let files = (try? fm.contentsOfDirectory(at: sessionsDir, includingPropertiesForKeys: nil))?
             .filter { $0.pathExtension == "json" } ?? []
 
-        var live: [(id: String, st: PetState, mtime: Date)] = []
+        var live: [String: (st: PetState, mtime: Date)] = [:]
         for f in files {
             let id = f.deletingPathExtension().lastPathComponent
             let m = (try? fm.attributesOfItem(atPath: f.path))?[.modificationDate] as? Date ?? Date(timeIntervalSince1970: 0)
             if -m.timeIntervalSinceNow > SESSION_STALE_SECONDS { try? fm.removeItem(at: f); continue }
             if let data = try? Data(contentsOf: f), let st = try? JSONDecoder().decode(PetState.self, from: data) {
-                live.append((id, st, m))
+                live[id] = (st, m)
             }
         }
-        for id in titleCache.keys where !live.contains(where: { $0.id == id }) { titleCache[id] = nil }
+        for id in titleCache.keys where live[id] == nil { titleCache[id] = nil }
 
-        if live.isEmpty { window.orderOut(nil); appliedPrimaryKey = ""; pinnedID = nil; naturalOrder = []; return }
-        if let pin = pinnedID, !live.contains(where: { $0.id == pin }) { pinnedID = nil }
+        // Maintain a STABLE order: keep existing positions, append new sessions
+        // (oldest-first), drop ended ones. Never reorder on state change.
+        order.removeAll { live[$0] == nil }
+        let newIDs = live.keys.filter { !order.contains($0) }.sorted { live[$0]!.mtime < live[$1]!.mtime }
+        order.append(contentsOf: newIDs)
 
-        // Natural order: most relevant first (no pin bias) — used for cycling + secondaries.
-        live.sort { a, b in
-            let pa = priority(a.st.state), pb = priority(b.st.state)
-            if pa != pb { return pa > pb }
-            return a.mtime > b.mtime
-        }
-        naturalOrder = live.map { $0.id }
+        if order.isEmpty { window.orderOut(nil); appliedKey = ""; selectedID = nil; return }
+        if selectedID == nil || live[selectedID!] == nil { selectedID = order.first }
 
-        let multi = live.count > 1
-        let primaryID = (pinnedID != nil && live.contains { $0.id == pinnedID }) ? pinnedID! : naturalOrder[0]
-        let p = live.first { $0.id == primaryID }!
-
-        stack.pinned = pinnedID != nil
-        stack.primary.caption = multi ? (sessionTitle(p.id, p.st) ?? folderName(p.st)) : nil
-        let key = p.id + "|" + p.st.state
-        if appliedPrimaryKey != key { appliedPrimaryKey = key; stack.primary.setState(p.st.state) }
-
-        stack.secondaries = live.filter { $0.id != primaryID }.map {
-            SessionItem(id: $0.id, state: $0.st.state,
-                        label: sessionTitle($0.id, $0.st) ?? folderName($0.st) ?? String($0.id.prefix(6)))
-        }
+        let sel = live[selectedID!]!
+        stack.items = order.compactMap { id in live[id].map { SessionItem(id: id, state: $0.st.state, label: label(id, $0.st) ?? String(id.prefix(6))) } }
+        stack.selectedID = selectedID
+        stack.primary.caption = label(selectedID!, sel.st)     // shown for single AND multi (wraps to 2 lines)
+        let key = selectedID! + "|" + sel.st.state
+        if appliedKey != key { appliedKey = key; stack.primary.setState(sel.st.state) }
 
         // Resize bottom-anchored (the corner stays put; the list grows upward).
         let h = stack.desiredHeight()
@@ -829,8 +826,9 @@ func renderStack(to path: String) {
     sv.primary.cfg = loadFrames(); sv.primary.sprite = loadActiveSprite()
     sv.primary.caption = "Validate race prediction methodology"
     sv.primary.setState("waiting")
-    sv.pinned = true
-    sv.secondaries = [
+    sv.selectedID = "sel"
+    sv.items = [
+        SessionItem(id: "sel", state: "waiting", label: "Validate race prediction methodology"),
         SessionItem(id: "a", state: "running", label: "api-service"),
         SessionItem(id: "b", state: "review", label: "Refactor architecture and files"),
         SessionItem(id: "c", state: "failed", label: "data-pipeline"),
