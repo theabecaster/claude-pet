@@ -1,0 +1,12 @@
+{
+  "frameWidth": 16,
+  "frameHeight": 16,
+  "scale": 4,
+  "fps": 8,
+  "animations": {
+    "idle":    [0],
+    "running": [1, 2, 3],
+    "waiting": [0],
+    "done":    [4]
+  }
+}

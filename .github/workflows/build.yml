@@ -1,0 +1,46 @@
+name: build
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ['v*']
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Smoke test (CLI paths, no GUI)
+        run: |
+          .build/release/ClaudePet --state running
+          test -f "$HOME/.claude-pet/state.json"
+          grep -q running "$HOME/.claude-pet/state.json"
+          .build/release/ClaudePet --install-hooks
+          test -f "$HOME/.claude/settings.json"
+          .build/release/ClaudePet --uninstall-hooks
+
+      - name: Package app
+        run: bash scripts/make-app.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Zip release bundle
+        run: |
+          cd dist
+          zip -r ../ClaudePet-macos.zip "ClaudePet.app" "Install Claude Pet.command" "Uninstall Claude Pet.command"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClaudePet-macos
+          path: ClaudePet-macos.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ClaudePet-macos.zip
+          generate_release_notes: true
