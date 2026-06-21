@@ -412,6 +412,8 @@ final class StackView: NSView {
     private var lastScreen = NSPoint.zero   // for window dragging (screen coords)
     private var moved: CGFloat = 0
     private var dragIndex: Int? = nil       // row being dragged (reorder)
+    private var dragging = false            // a reorder drag is in progress
+    private var dragCursorY: CGFloat = 0    // cursor Y so the lifted row follows
     private var windowDrag = false
     private var hoveredRow = -1
     private var scrollAccum: CGFloat = 0
@@ -445,6 +447,41 @@ final class StackView: NSView {
         return (i >= 0 && i < items.count) ? i : nil
     }
 
+    private func drawRow(_ it: SessionItem, in row: NSRect, selected: Bool, hovered: Bool, lifted: Bool, font: NSFont) {
+        let inner = row.insetBy(dx: 3, dy: 1)
+        if lifted {                                            // the row being dragged: pops out
+            Theme.termBG.setFill()
+            let p = NSBezierPath(roundedRect: inner, xRadius: 6, yRadius: 6); p.fill()
+            Theme.coral.setStroke(); p.lineWidth = 1.5; p.stroke()
+        } else if selected {
+            Theme.coral.withAlphaComponent(0.22).setFill()
+            NSBezierPath(roundedRect: inner, xRadius: 6, yRadius: 6).fill()
+            Theme.coral.setFill()
+            NSBezierPath(roundedRect: NSRect(x: inner.minX, y: inner.minY, width: 3, height: inner.height), xRadius: 1.5, yRadius: 1.5).fill()
+        } else if hovered {
+            Theme.coral.withAlphaComponent(0.10).setFill()
+            NSBezierPath(roundedRect: inner, xRadius: 6, yRadius: 6).fill()
+        }
+        // grip dots — signals the row is draggable (brighter on hover/lift)
+        NSColor.white.withAlphaComponent(hovered || lifted ? 0.55 : 0.28).setFill()
+        for r in 0..<2 { for dy in [-3.5, 0.0, 3.5] {
+            NSBezierPath(ovalIn: NSRect(x: row.minX + 8 + CGFloat(r) * 3.2, y: row.midY + CGFloat(dy) - 0.85, width: 1.7, height: 1.7)).fill()
+        } }
+        let dotR: CGFloat = 4
+        accentFor(it.state).setFill()
+        NSBezierPath(ovalIn: NSRect(x: row.minX + 20, y: row.midY - dotR, width: dotR * 2, height: dotR * 2)).fill()
+        let stStr = shortStatus(it.state) as NSString
+        let stAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: accentFor(it.state)]
+        let stSize = stStr.size(withAttributes: stAttrs)
+        let stX = row.maxX - 12 - stSize.width
+        stStr.draw(at: NSPoint(x: stX, y: row.midY - stSize.height / 2), withAttributes: stAttrs)
+        let nameX = row.minX + 32
+        let nmCol = selected ? Theme.termFG : Theme.termFG.withAlphaComponent(0.85)
+        let nmAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: nmCol]
+        let nm = truncated(it.label, font: font, maxW: stX - nameX - 8) as NSString
+        nm.draw(at: NSPoint(x: nameX, y: row.midY - nm.size(withAttributes: nmAttrs).height / 2), withAttributes: nmAttrs)
+    }
+
     override func draw(_ r: NSRect) {
         NSColor.clear.set(); r.fill()
         guard showList else { return }
@@ -455,32 +492,15 @@ final class StackView: NSView {
 
         let font = NSFont(name: "Menlo", size: 10) ?? .systemFont(ofSize: 10)
         for (i, it) in items.enumerated() {
+            if dragging && i == dragIndex { continue }          // leave a gap; drawn floating below
             let rowY = panel.maxY - innerPad - CGFloat(i + 1) * rowH
             let row = NSRect(x: panel.minX, y: rowY, width: panel.width, height: rowH)
-            let inner = row.insetBy(dx: 3, dy: 1)
-            if it.id == selectedID {                            // selected highlight + accent bar
-                Theme.coral.withAlphaComponent(0.22).setFill()
-                NSBezierPath(roundedRect: inner, xRadius: 6, yRadius: 6).fill()
-                Theme.coral.setFill()
-                NSBezierPath(roundedRect: NSRect(x: inner.minX, y: inner.minY, width: 3, height: inner.height),
-                             xRadius: 1.5, yRadius: 1.5).fill()
-            } else if i == hoveredRow {
-                Theme.coral.withAlphaComponent(0.10).setFill()
-                NSBezierPath(roundedRect: inner, xRadius: 6, yRadius: 6).fill()
-            }
-            let dotR: CGFloat = 4
-            accentFor(it.state).setFill()
-            NSBezierPath(ovalIn: NSRect(x: row.minX + 14, y: row.midY - dotR, width: dotR * 2, height: dotR * 2)).fill()
-            let stStr = shortStatus(it.state) as NSString
-            let stAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: accentFor(it.state)]
-            let stSize = stStr.size(withAttributes: stAttrs)
-            let stX = row.maxX - 12 - stSize.width
-            stStr.draw(at: NSPoint(x: stX, y: row.midY - stSize.height / 2), withAttributes: stAttrs)
-            let nameX = row.minX + 28
-            let nmCol = it.id == selectedID ? Theme.termFG : Theme.termFG.withAlphaComponent(0.85)
-            let nmAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: nmCol]
-            let nm = truncated(it.label, font: font, maxW: stX - nameX - 8) as NSString
-            nm.draw(at: NSPoint(x: nameX, y: row.midY - nm.size(withAttributes: nmAttrs).height / 2), withAttributes: nmAttrs)
+            drawRow(it, in: row, selected: it.id == selectedID, hovered: !dragging && i == hoveredRow, lifted: false, font: font)
+        }
+        if dragging, let di = dragIndex {                       // the lifted row follows the cursor
+            let cy = min(max(dragCursorY, panel.minY + rowH / 2), panel.maxY - rowH / 2)
+            let row = NSRect(x: panel.minX, y: cy - rowH / 2, width: panel.width, height: rowH)
+            drawRow(items[di], in: row, selected: items[di].id == selectedID, hovered: false, lifted: true, font: font)
         }
     }
 
@@ -504,9 +524,11 @@ final class StackView: NSView {
             if let win = window { var o = win.frame.origin; o.x += now.x - lastScreen.x; o.y += now.y - lastScreen.y; win.setFrameOrigin(o) }
             lastScreen = now
         } else if let di = dragIndex, moved > 3 {               // reorder this row live
+            dragging = true; dragCursorY = p.y
             if let t = rowIndex(at: p, clamp: true), t != di {
-                let it = items.remove(at: di); items.insert(it, at: t); dragIndex = t; needsDisplay = true
+                let it = items.remove(at: di); items.insert(it, at: t); dragIndex = t
             }
+            needsDisplay = true
         }
     }
     override func mouseUp(with e: NSEvent) {
@@ -514,7 +536,7 @@ final class StackView: NSView {
             if moved > 3 { onReorder?(items.map { $0.id }) }    // committed a manual reorder
             else { onSelect?(items[di].id) }                   // a click -> select
         }
-        dragIndex = nil; windowDrag = false
+        dragIndex = nil; windowDrag = false; dragging = false; needsDisplay = true
     }
 
     // Scroll over the widget to step the selection through sessions.
