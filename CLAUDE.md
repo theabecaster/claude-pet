@@ -105,19 +105,32 @@ polling, no network:
   `metaCache` keyed by transcript mtime; `metaLine()` formats `model · Nk ctx · branch ·
   mode` (humanized by `shortModel()` / `compactTokens()` / `modeBadge()`, mode omitted when
   default), drawn dim under the caption.
+- **Transcript FULL scan → `SessionTotals`.** `readTranscriptTotals()` reads the whole
+  file once to sum turns / input / output / cache tokens, an **estimated cost**
+  (`modelPrices()` per-MTok table × usage), and the active span (first→last `timestamp`).
+  Heavier than the tail scan, so it's only used on demand — `--status` and not the 4 Hz
+  overlay loop. `compactUSD()` formats the estimate.
 
 The selected `PetView` stacks **pet → pill (`detail`/label + `· elapsed`) → caption
-(title) → meta line**. `elapsedText` is **time-in-state**: `AppDelegate.stateSince[id]`
-is stamped whenever a session's state changes; `compactElapsed()` renders it. `PETH` was
-widened to fit the extra meta line.
+(title) → meta line → context gauge**. `elapsedText` is **time-in-state**:
+`AppDelegate.stateSince[id]` is stamped whenever a session's state changes;
+`compactElapsed()` renders it. `ctxFraction` (= ctx tokens / `prefs.contextBudget`) drives
+`drawGauge()` — a thin bar that runs green, amber past 75%, red past 90%. List rows show
+each session's `detail` on the right (dim) in place of the bare status word. `PETH` (192)
+fits the meta line + gauge.
+
+The built-in mascot **dozes off** after ~45s idle (`PetView.idleTicks > sleepAfterTicks`,
+mascot-only like the other code-drawn motion): `drawBuddy(sleeping:)` draws closed eyes +
+calm mouth, `motion()` switches to a slow breathing bob, and `drawZzz()` floats a few `z`s.
 
 ### Preferences, themes, alerts, and the pet-tap
 
 - **`Prefs`** (`~/.claude-pet/prefs.json`, loaded at launch, saved on every toggle): theme
-  id, `soundOnAttention`, `bounceOnAttention`, `muted`, `showMeta`, `showElapsed`. All
-  fields are optional-with-defaults so older files keep decoding. `applyToGlobals()` pushes
-  the theme into `Theme.current`. The **✳ menu is rebuilt** (`rebuildMenu()`) after each
-  change so checkmarks/theme dots stay in sync; `commitPrefs()` saves + rebuilds.
+  id, `soundOnAttention`, `bounceOnAttention`, `muted`, `showMeta`, `showElapsed`,
+  `contextBudget` (gauge denominator), `renudge`. All fields are optional-with-defaults so
+  older files keep decoding. `applyToGlobals()` pushes the theme into `Theme.current`. The
+  **✳ menu is rebuilt** (`rebuildMenu()`) after each change so checkmarks/theme dots/budget
+  dots stay in sync; `commitPrefs()` saves + rebuilds.
 - **Themes** are `Palette`s (`claude`/`midnight`/`grove`/`mono`). `Theme` is no longer a
   bag of `static let`s — `Theme.coral`/`termBG`/… are computed from `Theme.current`, so a
   theme switch recolors **everything** (pet, pills, rows, menu-bar icon) on the next
@@ -126,8 +139,14 @@ widened to fit the extra meta line.
   state (`waiting`/`failed`, not from another attention state) it calls
   `fireAttentionAlert()` — an `NSSound` chime and `requestUserAttention` bounce, each
   gated by prefs and debounced. `didInitialSync` suppresses alerts for sessions already
-  present at launch (no startup spam). No `UNUserNotificationCenter` — it would need
-  entitlements the accessory binary can't rely on; sound + bounce work unconditionally.
+  present at launch (no startup spam). While a session keeps waiting, the steady-state
+  branch **re-nudges** every `RENUDGE_SECONDS` (gated by `prefs.renudge`, tracked via
+  `lastNudge[id]`). No `UNUserNotificationCenter` — it would need entitlements the accessory
+  binary can't rely on; sound + bounce work unconditionally.
+- **Global hotkey.** `registerHotKey()` uses Carbon `RegisterEventHotKey` (⌃⌥⌘P → toggle
+  show/hide) — works for an accessory app with no extra entitlements or accessibility grant,
+  unlike a global `NSEvent` monitor. The C handler hops to the main queue and calls
+  `toggleVisibility()`.
 - **Pet-tap.** A non-drag tap landing inside `primary.frame` fires `StackView.onPetTapped`
   → `PetView.poke()`: a one-shot happy hop (`pokeUntil` adds a decaying bounce to the
   mascot's `motion()`) that settles back to `baseState` (the real session state) via the

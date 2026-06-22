@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Darwin
 import UniformTypeIdentifiers
+import Carbon.HIToolbox
 
 // MARK: - Paths
 
@@ -17,6 +18,7 @@ let layoutURL = stateDir.appendingPathComponent("layout.json")   // persisted ma
 let prefsURL = stateDir.appendingPathComponent("prefs.json")     // persisted user preferences
 func sessionFile(_ id: String) -> URL { sessionsDir.appendingPathComponent(id + ".json") }
 let SESSION_STALE_SECONDS: TimeInterval = 12 * 3600
+let RENUDGE_SECONDS: TimeInterval = 90    // re-chime interval while a session keeps waiting
 // Active sprite sheet — Codex pets ship a WebP, so .webp is preferred.
 let activeNames = ["active.webp", "active.png"]
 
@@ -122,6 +124,8 @@ struct Prefs: Codable {
     var showMeta: Bool = true           // model · context · branch line under the pet
     var showElapsed: Bool = true        // time-in-state suffix in the status pill
     var muted: Bool = false             // master mute for all attention alerts
+    var contextBudget: Int = 200_000    // gauge denominator (tokens); amber→red as it fills
+    var renudge: Bool = true            // re-chime while a session keeps waiting on you
 
     static func load() -> Prefs {
         if let d = try? Data(contentsOf: prefsURL),
@@ -276,6 +280,63 @@ func readTranscriptMeta(_ path: String, ignoreCustom: Bool = false) -> SessionMe
     return meta
 }
 
+// Cumulative session totals from a FULL transcript scan: turns, token sums, an
+// estimated cost, and the active span (first→last record timestamp). Heavier than
+// the tail scan, so callers cache it by mtime and only read on demand (status / menu).
+struct SessionTotals {
+    var turns = 0
+    var inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0
+    var costUSD: Double = 0
+    var firstTS: Date?, lastTS: Date?
+    var duration: TimeInterval? {
+        guard let f = firstTS, let l = lastTS, l >= f else { return nil }
+        return l.timeIntervalSince(f)
+    }
+}
+
+// Public Anthropic per-MTok prices by model family (input, output, cache-read,
+// cache-write). A rough estimate, clearly labeled as such where shown.
+func modelPrices(_ model: String?) -> (inp: Double, out: Double, cr: Double, cw: Double) {
+    let m = (model ?? "").lowercased()
+    if m.contains("opus")  { return (15, 75, 1.5, 18.75) }
+    if m.contains("haiku") { return (0.8, 4, 0.08, 1.0) }
+    return (3, 15, 0.30, 3.75)   // sonnet / fable / unknown
+}
+
+func readTranscriptTotals(_ path: String) -> SessionTotals {
+    var t = SessionTotals()
+    guard let data = FileManager.default.contents(atPath: path),
+          let text = String(data: data, encoding: .utf8) else { return t }
+    let isoFrac = ISO8601DateFormatter(); isoFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let isoPlain = ISO8601DateFormatter(); isoPlain.formatOptions = [.withInternetDateTime]
+    func parseTS(_ s: String) -> Date? { isoFrac.date(from: s) ?? isoPlain.date(from: s) }
+    for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+        guard let d = line.data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
+        if let ts = o["timestamp"] as? String, let date = parseTS(ts) {
+            if t.firstTS == nil { t.firstTS = date }
+            t.lastTS = date
+        }
+        guard (o["type"] as? String) == "assistant", let m = o["message"] as? [String: Any],
+              let u = m["usage"] as? [String: Any] else { continue }
+        let inp = (u["input_tokens"] as? Int) ?? 0, out = (u["output_tokens"] as? Int) ?? 0
+        let cr = (u["cache_read_input_tokens"] as? Int) ?? 0, cc = (u["cache_creation_input_tokens"] as? Int) ?? 0
+        if inp + out + cr + cc == 0 { continue }
+        t.turns += 1
+        t.inputTokens += inp; t.outputTokens += out; t.cacheReadTokens += cr; t.cacheWriteTokens += cc
+        let p = modelPrices(m["model"] as? String)
+        t.costUSD += (Double(inp) * p.inp + Double(out) * p.out + Double(cr) * p.cr + Double(cc) * p.cw) / 1_000_000
+    }
+    return t
+}
+
+// Compact a dollar estimate: "<$0.01", "$0.42", "$12".
+func compactUSD(_ v: Double) -> String {
+    if v < 0.01 { return "<$0.01" }
+    if v < 10 { return String(format: "$%.2f", v) }
+    return String(format: "$%.0f", v)
+}
+
 // MARK: - State model
 
 struct StateDesc { let anim: String; let label: String?; let dot: NSColor?; let oneShot: String? }
@@ -331,7 +392,7 @@ func loadActiveSprite() -> NSImage? {
 // Motion is keyed to attention: calm when working/idle, attention-grabbing when it
 // needs you. `phase` is continuous seconds for smooth, paced motion.
 
-func drawBuddy(in rect: NSRect, accent: NSColor, anim: String, phase: Double, bodyFill: NSColor? = nil) {
+func drawBuddy(in rect: NSRect, accent: NSColor, anim: String, phase: Double, bodyFill: NSColor? = nil, sleeping: Bool = false) {
     let body = NSBezierPath(roundedRect: rect, xRadius: rect.width * 0.32, yRadius: rect.height * 0.32)
     (bodyFill ?? Theme.termBG).setFill(); body.fill()
     accent.setStroke(); body.lineWidth = max(2, rect.width * 0.05); body.stroke()
@@ -339,6 +400,7 @@ func drawBuddy(in rect: NSRect, accent: NSColor, anim: String, phase: Double, bo
     let eyeR = rect.width * 0.12, eyeDX = rect.width * 0.19
     let eyeY = rect.midY + rect.height * 0.06, cx = rect.midX
     let mode: String = {
+        if sleeping { return "sleep" }
         switch anim {
         case "review", "jumping", "done", "ready": return "happy"
         case "waiting": return "wow"
@@ -351,6 +413,15 @@ func drawBuddy(in rect: NSRect, accent: NSColor, anim: String, phase: Double, bo
 
     func eye(_ ex: CGFloat) {
         let c = NSPoint(x: ex, y: eyeY)
+        if mode == "sleep" {                                   // calm closed eyes (gentle down-arc)
+            let p = NSBezierPath(); p.lineWidth = max(2, rect.width * 0.035); p.lineCapStyle = .round
+            let r = eyeR
+            p.move(to: NSPoint(x: c.x - r, y: c.y))
+            p.curve(to: NSPoint(x: c.x + r, y: c.y),
+                    controlPoint1: NSPoint(x: c.x - r * 0.3, y: c.y - r * 0.7),
+                    controlPoint2: NSPoint(x: c.x + r * 0.3, y: c.y - r * 0.7))
+            accent.setStroke(); p.stroke(); return
+        }
         if mode == "dead" {
             let p = NSBezierPath(); p.lineWidth = max(2, rect.width * 0.035); p.lineCapStyle = .round
             let r = eyeR * 0.8
@@ -382,6 +453,9 @@ func drawBuddy(in rect: NSRect, accent: NSColor, anim: String, phase: Double, bo
     let my = rect.midY - rect.height * 0.20, mw = rect.width * 0.16
     let mouth = NSBezierPath(); mouth.lineWidth = max(2, rect.width * 0.04); mouth.lineCapStyle = .round
     switch mode {
+    case "sleep":
+        mouth.move(to: NSPoint(x: cx - mw * 0.4, y: my)); mouth.line(to: NSPoint(x: cx + mw * 0.4, y: my))
+        accent.withAlphaComponent(0.7).setStroke(); mouth.stroke()
     case "happy":
         mouth.move(to: NSPoint(x: cx - mw, y: my + rect.height * 0.02))
         mouth.curve(to: NSPoint(x: cx + mw, y: my + rect.height * 0.02),
@@ -452,6 +526,7 @@ final class PetView: NSView {
     var detail: String?          // verb / reason folded into the pill ("editing", "rate limited"…)
     var elapsedText: String?     // time-in-state, e.g. "12s" (shown when showElapsed)
     var metaText: String?        // "opus 4.8 · 45k · main" line under the caption
+    var ctxFraction: Double?     // context used / budget → the gauge bar (nil hides it)
     var showElapsed = true
     var baseState = "idle"       // the true session state, so a one-shot poke returns to it
 
@@ -459,7 +534,12 @@ final class PetView: NSView {
     private var spriteAccum = 0.0
     private var oneShotElapsed = 0.0
     private var pokeUntil = 0.0   // ticks-based: extra happy bounce window after a tap
+    private var idleTicks = 0     // how long we've sat in idle → drives the sleep animation
+    private let sleepAfterTicks = 45 * 30   // doze off after ~45s idle
     private var phase: Double { Double(ticks) / 30.0 }
+    // The built-in mascot dozes off after a calm idle stretch (mascot-only, like the
+    // other code-drawn motion; a custom sprite keeps its own idle frames).
+    private var sleeping: Bool { sprite == nil && anim == "idle" && idleTicks > sleepAfterTicks }
 
     // A friendly reaction when the user taps the pet: a happy hop now, settling back
     // into whatever the session is actually doing. Purely cosmetic.
@@ -503,6 +583,7 @@ final class PetView: NSView {
 
     func advance() {
         ticks += 1
+        idleTicks = (anim == "idle") ? idleTicks + 1 : 0
         if sprite != nil {
             spriteAccum += stateFPS() / 30.0
             while spriteAccum >= 1 {
@@ -525,6 +606,7 @@ final class PetView: NSView {
     // Attention-keyed motion: working/idle barely move; waiting bobs + red halo; failed shakes.
     private func motion() -> (dx: CGFloat, dy: CGFloat, ring: CGFloat) {
         let p = phase
+        if sleeping { return (0, CGFloat(sin(p * 2 * .pi * 0.12)) * 1.0, 0) }   // slow breathing
         var m: (dx: CGFloat, dy: CGFloat, ring: CGFloat)
         switch anim {
         case "waiting":
@@ -577,15 +659,46 @@ final class PetView: NSView {
             img.draw(in: dest, from: NSRect(x: CGFloat(col) * fw, y: srcY, width: fw, height: fh),
                      operation: .sourceOver, fraction: 1.0)
         } else {
-            drawBuddy(in: dest, accent: accentFor(anim), anim: anim, phase: phase)
+            drawBuddy(in: dest, accent: accentFor(anim), anim: anim, phase: phase, sleeping: sleeping)
+            if sleeping { drawZzz(near: dest) }
         }
 
-        // Text uses the BASE rect (no bob) so it stays stable: pet -> pill -> caption -> meta.
+        // Text uses the BASE rect (no bob) so it stays stable: pet -> pill -> caption -> meta -> gauge.
         let textRect = NSRect(x: baseX, y: baseY, width: drawW, height: drawH)
         var topY = textRect.maxY
         if let label = pillText() { topY = drawBubble(label, dot: bubbleDot, above: textRect) }
         if let cap = caption { topY = drawCaption(cap, atY: topY + 5) }
-        if let meta = metaText { drawMeta(meta, atY: topY + 2) }
+        if let meta = metaText { topY = drawMeta(meta, atY: topY + 2) }
+        if let frac = ctxFraction { drawGauge(frac, atY: topY + 4) }
+    }
+
+    // A few drifting "z"s above a dozing mascot.
+    private func drawZzz(near rect: NSRect) {
+        let base = NSPoint(x: rect.maxX - rect.width * 0.10, y: rect.maxY - rect.height * 0.18)
+        for i in 0..<3 {
+            let t = (phase * 0.5 + Double(i) * 0.33).truncatingRemainder(dividingBy: 1)   // 0→1 loop
+            let size = 9 + CGFloat(i) * 3
+            let x = base.x + CGFloat(t) * 14, y = base.y + CGFloat(t) * 20
+            let alpha = (1 - t) * 0.85
+            let f = NSFont(name: "Menlo-Bold", size: size) ?? NSFont.boldSystemFont(ofSize: size)
+            let a: [NSAttributedString.Key: Any] = [.font: f, .foregroundColor: Theme.coral.withAlphaComponent(CGFloat(alpha))]
+            ("z" as NSString).draw(at: NSPoint(x: x, y: min(y, bounds.height - size)), withAttributes: a)
+        }
+    }
+
+    // A thin context-usage bar: green normally, amber as it fills, red near the limit
+    // (where Claude Code is likely to auto-compact). Centered under the meta line.
+    private func drawGauge(_ frac: Double, atY y: CGFloat) {
+        let w = min(bounds.width - 44, 150), h: CGFloat = 4
+        let x = (bounds.width - w) / 2
+        let yy = min(y, bounds.height - h - 2)
+        let track = NSBezierPath(roundedRect: NSRect(x: x, y: yy, width: w, height: h), xRadius: 2, yRadius: 2)
+        Theme.termFG.withAlphaComponent(0.15).setFill(); track.fill()
+        let f = max(0.02, min(1.0, frac))
+        let col: NSColor = frac >= 0.9 ? Theme.red
+            : (frac >= 0.75 ? NSColor(red: 0.92, green: 0.62, blue: 0.22, alpha: 1) : Theme.green)
+        let fill = NSBezierPath(roundedRect: NSRect(x: x, y: yy, width: w * CGFloat(f), height: h), xRadius: 2, yRadius: 2)
+        col.setFill(); fill.fill()
     }
 
     // The status pill text: the activity/reason (detail) takes over the bare state
@@ -623,7 +736,8 @@ final class PetView: NSView {
 
     // The companion "intelligence" line: model · context · branch, parsed from the
     // transcript. Dim and small; the coral accent ties it to the rest of the chrome.
-    private func drawMeta(_ text: String, atY y: CGFloat) {
+    @discardableResult
+    private func drawMeta(_ text: String, atY y: CGFloat) -> CGFloat {
         let font: NSFont = NSFont(name: "Menlo", size: 8) ?? NSFont.systemFont(ofSize: 8)
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.coral.withAlphaComponent(0.78)]
         let s = truncated(text, font: font, maxW: bounds.width - 6) as NSString
@@ -631,6 +745,7 @@ final class PetView: NSView {
         let x = min(max(2, (bounds.width - sz.width) / 2), bounds.width - sz.width - 2)
         let ly = min(y, bounds.height - sz.height - 1)
         s.draw(at: NSPoint(x: x, y: ly), withAttributes: attrs)
+        return ly + sz.height
     }
 
     private func wrapCaption(_ text: String, maxW: CGFloat, attrs: [NSAttributedString.Key: Any]) -> [String] {
@@ -694,7 +809,7 @@ final class StackView: NSView {
     var onCycle: ((Int) -> Void)?
     var onPetTapped: (() -> Void)?
 
-    let W: CGFloat = 232, PETH: CGFloat = 178
+    let W: CGFloat = 232, PETH: CGFloat = 192
     let rowH: CGFloat = 26, innerPad: CGFloat = 7, margin: CGFloat = 8, gap: CGFloat = 6
     private var downInWin = NSPoint.zero    // mouse-down point in view coords
     private var lastScreen = NSPoint.zero   // for window dragging (screen coords)
@@ -759,8 +874,14 @@ final class StackView: NSView {
         let dotR: CGFloat = 4
         accentFor(it.state).setFill()
         NSBezierPath(ovalIn: NSRect(x: row.minX + 20, y: row.midY - dotR, width: dotR * 2, height: dotR * 2)).fill()
-        let stStr = shortStatus(it.state) as NSString
-        let stAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: accentFor(it.state)]
+        // Right side: what the session is doing (its activity detail), or the bare
+        // status word when there's no detail. The dot already carries the state color,
+        // so the detail reads in a calmer dim tone and is width-capped to protect the name.
+        let hasDetail = (it.detail?.isEmpty == false)
+        let rightRaw = hasDetail ? it.detail! : shortStatus(it.state)
+        let rightCol = hasDetail ? Theme.termFG.withAlphaComponent(0.55) : accentFor(it.state)
+        let stStr = truncated(rightRaw, font: font, maxW: 116) as NSString
+        let stAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: rightCol]
         let stSize = stStr.size(withAttributes: stAttrs)
         let stX = row.maxX - 12 - stSize.width
         stStr.draw(at: NSPoint(x: stX, y: row.midY - stSize.height / 2), withAttributes: stAttrs)
@@ -853,6 +974,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var metaCache: [String: (mtime: Date?, meta: SessionMeta)] = [:]
     var prefs = Prefs()
     var prevStates: [String: String] = [:]   // last-seen state per session (for transition alerts)
+    var lastNudge: [String: Date] = [:]       // last re-nudge time per session
     var stateSince: [String: Date] = [:]      // when each session entered its current state
     var didInitialSync = false                // suppress alerts for sessions present at launch
 
@@ -884,6 +1006,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             for it in items {
                 var title = it.label
                 if let d = it.detail, !d.isEmpty { title += " — " + d } else { title += " — " + shortStatus(it.state) }
+                if let age = sessionAge(it.id) { title += "  ·  up " + age }
                 let mi = NSMenuItem(title: title, action: #selector(selectSession(_:)), keyEquivalent: "")
                 mi.representedObject = it.id
                 mi.state = (it.id == selectedID) ? .on : .off
@@ -893,7 +1016,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
-        menu.addItem(NSMenuItem(title: "Show / Hide", action: #selector(toggleVisibility), keyEquivalent: "p"))
+        menu.addItem(NSMenuItem(title: "Show / Hide  (⌃⌥⌘P)", action: #selector(toggleVisibility), keyEquivalent: "p"))
         menu.addItem(.separator())
 
         // Theme submenu
@@ -916,10 +1039,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(toggle("Sound on Attention", prefs.soundOnAttention && !prefs.muted, #selector(toggleSound)))
         menu.addItem(toggle("Bounce on Attention", prefs.bounceOnAttention && !prefs.muted, #selector(toggleBounce)))
+        menu.addItem(toggle("Re-nudge While Waiting", prefs.renudge, #selector(toggleRenudge)))
         menu.addItem(toggle("Mute All Alerts", prefs.muted, #selector(toggleMuted)))
         menu.addItem(.separator())
         menu.addItem(toggle("Show Session Info", prefs.showMeta, #selector(toggleMeta)))
         menu.addItem(toggle("Show Time in State", prefs.showElapsed, #selector(toggleElapsed)))
+
+        // Context-gauge budget submenu (the gauge's denominator)
+        let budgetItem = NSMenuItem(title: "Context Budget", action: nil, keyEquivalent: "")
+        let budgetMenu = NSMenu()
+        for (label, value) in [("200k (default)", 200_000), ("500k", 500_000), ("1M", 1_000_000)] {
+            let bi = NSMenuItem(title: label, action: #selector(pickBudget(_:)), keyEquivalent: "")
+            bi.representedObject = value
+            bi.state = (prefs.contextBudget == value) ? .on : .off
+            budgetMenu.addItem(bi)
+        }
+        budgetItem.submenu = budgetMenu
+        menu.addItem(budgetItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Get Custom Pets (codex-pets.net)…", action: #selector(browseCustomPets), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Load Pet… (Codex .webp or folder)", action: #selector(loadSprite), keyEquivalent: "l"))
@@ -949,8 +1085,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func toggleSound()   { prefs.soundOnAttention.toggle(); commitPrefs() }
     @objc func toggleBounce()  { prefs.bounceOnAttention.toggle(); commitPrefs() }
     @objc func toggleMuted()   { prefs.muted.toggle(); commitPrefs() }
+    @objc func toggleRenudge() { prefs.renudge.toggle(); commitPrefs() }
     @objc func toggleMeta()    { prefs.showMeta.toggle(); commitPrefs(); sync() }
     @objc func toggleElapsed() { prefs.showElapsed.toggle(); commitPrefs(); sync() }
+    @objc func pickBudget(_ sender: NSMenuItem) {
+        guard let v = sender.representedObject as? Int else { return }
+        prefs.contextBudget = v; commitPrefs(); sync()
+    }
+
+    // Wall-clock age of a session, from when its state file was first written.
+    private func sessionAge(_ id: String) -> String? {
+        guard let created = (try? FileManager.default.attributesOfItem(atPath: sessionFile(id).path))?[.creationDate] as? Date
+        else { return nil }
+        return compactElapsed(Date().timeIntervalSince(created))
+    }
 
     // Reflect the selected session's state in the menu bar (state in the key so a
     // sprite swap or state change re-renders, but steady state is a no-op).
@@ -965,6 +1113,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func toggleVisibility() {
         hidden.toggle()
         if hidden { window.orderOut(nil) } else { window.orderFrontRegardless() }
+    }
+
+    // A system-wide hotkey (⌃⌥⌘P) to show/hide the overlay without opening the menu.
+    // Carbon's RegisterEventHotKey works for an accessory app and needs no extra
+    // entitlements or accessibility permission (unlike a global NSEvent monitor).
+    private var hotKeyRef: EventHotKeyRef?
+    private func registerHotKey() {
+        let mods = UInt32(controlKey | optionKey | cmdKey)
+        let keyP = UInt32(kVK_ANSI_P)
+        let id = EventHotKeyID(signature: OSType(0x43505054), id: 1)   // 'CPPT'
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ -> OSStatus in
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.toggleVisibility() }
+            return noErr
+        }, 1, &spec, nil, nil)
+        RegisterEventHotKey(keyP, mods, id, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
     // Facilitate getting a custom pet: open the gallery, then spell out the two-step
     // flow (download a sheet → Load Pet…) so it's obvious how to apply what you find.
@@ -1043,6 +1207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !hooksPointToSelf() { installHooks() }
         prefs = Prefs.load(); prefs.applyToGlobals()
         setupMenu()
+        registerHotKey()
 
         stack = StackView(frame: NSRect(x: 0, y: 0, width: 232, height: 200))
         stack.primary.cfg = loadFrames(); stack.primary.sprite = loadActiveSprite()
@@ -1146,20 +1311,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for id in metaCache.keys where live[id] == nil { metaCache[id] = nil }
         for id in stateSince.keys where live[id] == nil { stateSince[id] = nil }
         for id in prevStates.keys where live[id] == nil { prevStates[id] = nil }
+        for id in lastNudge.keys where live[id] == nil { lastNudge[id] = nil }
 
         // Track time-in-state and fire attention alerts on transitions INTO an
         // attention state (needs you / failed), for any session — not just the
         // selected one. The first sync after launch only records baselines so we
         // don't alert for sessions that were already waiting when the app started.
+        // While a session keeps waiting on you, optionally re-nudge on an interval.
         let now = Date()
         for (id, v) in live {
             let s = v.st.state
             if prevStates[id] != s {
                 stateSince[id] = now
+                lastNudge[id] = nil
                 if didInitialSync, isAttentionState(s), !isAttentionState(prevStates[id] ?? "") {
-                    fireAttentionAlert()
+                    fireAttentionAlert(); lastNudge[id] = now
                 }
                 prevStates[id] = s
+            } else if didInitialSync, prefs.renudge, isAttentionState(s) {
+                let since = stateSince[id] ?? now
+                if now.timeIntervalSince(since) > RENUDGE_SECONDS,
+                   now.timeIntervalSince(lastNudge[id] ?? .distantPast) > RENUDGE_SECONDS {
+                    lastNudge[id] = now; fireAttentionAlert()
+                }
             }
         }
         didInitialSync = true
@@ -1189,6 +1363,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stack.primary.elapsedText = prefs.showElapsed
             ? stateSince[selectedID!].map { compactElapsed(now.timeIntervalSince($0)) } : nil
         stack.primary.metaText = prefs.showMeta ? metaLine(selectedID!, sel.st) : nil
+        if prefs.showMeta, prefs.contextBudget > 0, let tok = sessionMeta(selectedID!, sel.st).ctxTokens {
+            stack.primary.ctxFraction = Double(tok) / Double(prefs.contextBudget)
+        } else { stack.primary.ctxFraction = nil }
         let key = selectedID! + "|" + sel.st.state
         if appliedKey != key { appliedKey = key; stack.primary.setState(sel.st.state) }
         updateMenuBarIcon(sel.st.state)
@@ -1469,7 +1646,17 @@ func statusReport() {
         if let b = meta.branch { bits.append(b) }
         if let badge = modeBadge(st.mode) { bits.append(badge) }
         if !bits.isEmpty { print("        \(bits.joined(separator: " · "))") }
+        // Cumulative totals (full transcript scan): turns, tokens, est. cost, duration.
+        if let tp = st.transcript {
+            let t = readTranscriptTotals(tp)
+            if t.turns > 0 {
+                var totals = "turns \(t.turns) · in \(compactTokens(t.inputTokens)) · out \(compactTokens(t.outputTokens)) · ~\(compactUSD(t.costUSD))"
+                if let dur = t.duration { totals += " · up \(compactElapsed(dur))" }
+                print("        \(totals)")
+            }
+        }
     }
+    print("  cost figures are rough estimates (public per-token prices).")
 }
 
 func renderIcon(to path: String, size: Int = 1024) {
@@ -1586,10 +1773,29 @@ func selfTest() -> Bool {
     check("palette lookup falls back", Palette.byID("nope").id == "claude" && Palette.byID("midnight").id == "midnight")
 
     // 7) Prefs round-trip (in-memory; never touches the user's prefs.json).
-    var p = Prefs(); p.theme = "grove"; p.muted = true; p.showMeta = false
+    var p = Prefs(); p.theme = "grove"; p.muted = true; p.showMeta = false; p.contextBudget = 500_000; p.renudge = false
     if let d = try? JSONEncoder().encode(p), let r = try? JSONDecoder().decode(Prefs.self, from: d) {
-        check("prefs round-trip", r.theme == "grove" && r.muted && !r.showMeta)
+        check("prefs round-trip", r.theme == "grove" && r.muted && !r.showMeta && r.contextBudget == 500_000 && !r.renudge)
     } else { check("prefs round-trip", false) }
+
+    // 8) Cost / totals helpers.
+    check("compactUSD formats", compactUSD(0.004) == "<$0.01" && compactUSD(0.42) == "$0.42" && compactUSD(13.0) == "$13")
+    check("modelPrices vary by family", modelPrices("claude-opus-4-8").out == 75 && modelPrices("claude-haiku-4-5").out == 4)
+
+    // 9) Full-transcript totals on a synthesized JSONL (temp file; cleaned up).
+    let tmp = NSTemporaryDirectory() + "claudepet-selftest-\(getpid()).jsonl"
+    let sample = """
+    {"type":"assistant","timestamp":"2026-01-01T00:00:00.000Z","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":200,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+    {"type":"user","timestamp":"2026-01-01T00:05:00.000Z","message":{}}
+    {"type":"assistant","timestamp":"2026-01-01T00:10:00.000Z","message":{"model":"claude-opus-4-8","usage":{"input_tokens":2000,"output_tokens":300,"cache_read_input_tokens":500,"cache_creation_input_tokens":0}}}
+    """
+    try? sample.write(toFile: tmp, atomically: true, encoding: .utf8)
+    let totals = readTranscriptTotals(tmp)
+    try? FileManager.default.removeItem(atPath: tmp)
+    check("totals count turns", totals.turns == 2)
+    check("totals sum tokens", totals.inputTokens == 3000 && totals.outputTokens == 500)
+    check("totals span duration", Int(totals.duration ?? 0) == 600)
+    check("totals estimate cost", totals.costUSD > 0)
 
     print(ok ? "SELFTEST: ALL PASS" : "SELFTEST: FAILURES")
     return ok
@@ -1604,13 +1810,14 @@ func renderStack(to path: String) {
     sv.primary.detail = "permission: run Bash"     // why it needs you (from the Notification hook)
     sv.primary.elapsedText = "2m"                   // time-in-state
     sv.primary.metaText = "opus 4.8 · 43k ctx · main"  // model · context · branch (from transcript)
+    sv.primary.ctxFraction = 0.42                   // context gauge bar
     sv.selectedID = "sel"
     sv.items = [
-        SessionItem(id: "sel", state: "waiting", label: "Validate race prediction methodology"),
-        SessionItem(id: "a", state: "running", label: "api-service"),
-        SessionItem(id: "b", state: "review", label: "Refactor architecture and files"),
-        SessionItem(id: "c", state: "failed", label: "data-pipeline"),
-        SessionItem(id: "d", state: "idle", label: "docs-site"),
+        SessionItem(id: "sel", state: "waiting", label: "Validate race prediction", detail: "run Bash"),
+        SessionItem(id: "a", state: "running", label: "api-service", detail: "editing app.ts"),
+        SessionItem(id: "b", state: "review", label: "Refactor architecture", detail: nil),
+        SessionItem(id: "c", state: "failed", label: "data-pipeline", detail: "rate limited"),
+        SessionItem(id: "d", state: "idle", label: "docs-site", detail: nil),
     ]
     let h = sv.desiredHeight()
     sv.frame = NSRect(x: 0, y: 0, width: sv.W, height: h)
@@ -1639,8 +1846,10 @@ func renderState(_ state: String, to path: String) {
     v.detail  = env["CLAUDEPET_DETAIL"]
     v.metaText = env["CLAUDEPET_META"]
     v.elapsedText = env["CLAUDEPET_ELAPSED"]
+    v.ctxFraction = env["CLAUDEPET_CTXFRAC"].flatMap { Double($0) }
     v.setState(state)
-    for _ in 0..<8 { v.advance() }                            // settle into a representative frame
+    let frames = env["CLAUDEPET_ADVANCE"].flatMap { Int($0) } ?? 8   // QA: crank to reach the sleep state
+    for _ in 0..<frames { v.advance() }                      // settle into a representative frame
     guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
     v.cacheDisplay(in: v.bounds, to: rep)
     let img = NSImage(size: v.bounds.size)

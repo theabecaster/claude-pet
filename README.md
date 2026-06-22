@@ -79,10 +79,13 @@ writes to the transcript:
 - **Time-in-state.** A compact `· 12s` / `· 3m` tells you how long it's been
   working on this step or waiting for you.
 - **A live session readout.** Under the name: the **model** (`opus 4.8`), the
-  **context size** so far (`43k ctx` — handy for spotting an approaching
-  auto-compact), the **git branch** (`main`), and the **permission mode** when it's
-  not the default (`plan`, `auto-edits`, `bypass`). All read cheaply from the tail
-  of the session transcript and the hook payloads.
+  **context size** so far (`43k ctx`), the **git branch** (`main`), and the
+  **permission mode** when it's not the default (`plan`, `auto-edits`, `bypass`).
+- **A context gauge.** A thin bar tracks context use against a budget (200k by
+  default; **✳ → Context Budget** for 500k / 1M). It runs green, turns **amber**
+  past 75%, and **red** near the limit — a heads-up before Claude auto-compacts.
+
+All read cheaply from the tail of the session transcript and the hook payloads.
 
 ## Get a nudge when it needs you
 
@@ -90,7 +93,8 @@ When a session crosses into **needs you** or **errors**, Claude Pet can **chime*
 and **bounce** to get your attention — even if the overlay is behind other windows.
 Both are independent toggles in the **✳ menu** (with a master **Mute All Alerts**),
 and they only fire on the *transition*, so a session that's already waiting when you
-launch won't spam you.
+launch won't spam you. If you miss it, **Re-nudge While Waiting** gently re-chimes
+every so often until you get to it.
 
 ## Make it yours
 
@@ -99,8 +103,12 @@ launch won't spam you.
   icon all recolor instantly. Your pick is remembered.
 - **Pet the pet.** Tap the big pet and it does a happy little hop, then settles
   back into whatever it was doing. Purely for joy.
+- **It dozes off.** Leave a session idle a while and the built-in mascot falls
+  asleep — closed eyes and a drifting `z` — then wakes the moment work resumes.
+- **Global show/hide.** Press **⌃⌥⌘P** anywhere to toggle the overlay, no need to
+  reach for the menu.
 
-Every preference (theme, alerts, info toggles) is saved to
+Every preference (theme, alerts, info toggles, context budget) is saved to
 `~/.claude-pet/prefs.json` and restored on launch.
 
 ## Lives in your menu bar too
@@ -112,9 +120,10 @@ overlay hidden (**✳ → Show / Hide**) you can still glance up and see what Cl
 is doing.
 
 Open the **✳ menu** and the top is a **live Sessions list** — every session with
-its state and what it's currently doing. Click one to make it the big pet (and pop
-the overlay back if it was hidden). Prefer the terminal? `ClaudePet --status`
-prints the same health-and-sessions report.
+its state, what it's currently doing, and how long it's been running. Click one to
+make it the big pet (and pop the overlay back if it was hidden). Prefer the
+terminal? `ClaudePet --status` prints a fuller report — per session it adds
+**turns, token totals, an estimated cost, and duration**.
 
 ## Multiple sessions — one tidy stack
 
@@ -125,8 +134,10 @@ mess of windows. The **selected** session shows as the big pet in the corner; al
 your sessions appear in a clean list above it, in a **stable order that never
 shuffles on its own**. Each row shows the session's **title** — the same name
 Claude Code shows in its session list, so renaming a session there renames its
-pet too (falls back to the AI-generated title, then the project folder) — and a
-color-coded status, so you can see at a glance which one needs you.
+pet too (falls back to the AI-generated title, then the project folder) — a
+color-coded state dot, and **what that session is doing right now** ("editing
+app.ts", "run Bash", "rate limited"), so you can see at a glance which one needs
+you and why.
 
 You're in control:
 
