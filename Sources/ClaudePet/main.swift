@@ -715,7 +715,7 @@ final class PetView: NSView {
         let a = CGFloat(revealAmount)
         let textRect = NSRect(x: baseX, y: baseY, width: drawW, height: drawH)
         if let label = pillText() {
-            drawBubble(label, dot: bubbleDot, atY: textRect.maxY + 6, alpha: a, progress: ctxProgress)
+            drawThought(label, dot: bubbleDot, petTop: textRect.maxY, alpha: a, progress: ctxProgress)
         }
     }
 
@@ -760,12 +760,15 @@ final class PetView: NSView {
     }
 
 
+    // The status as a THOUGHT BUBBLE floating over the pet: a soft rounded cloud with
+    // two little trailing puffs leading down to the pet's head — visually distinct from
+    // the squared-off session picker. The bubble's border is still the context gauge
+    // (a clockwise green→amber→red progress stroke).
     @discardableResult
-    private func drawBubble(_ label: String, dot: NSColor?, atY y: CGFloat, alpha: CGFloat = 1, progress: Double? = nil) -> CGFloat {
+    private func drawThought(_ label: String, dot: NSColor?, petTop: CGFloat, alpha: CGFloat = 1, progress: Double? = nil) -> CGFloat {
         let font: NSFont = NSFont(name: "Menlo", size: 11) ?? NSFont.boldSystemFont(ofSize: 11)
-        let dotR: CGFloat = 4, padX: CGFloat = 8, padY: CGFloat = 4, gap: CGFloat = 6
+        let dotR: CGFloat = 4, padX: CGFloat = 9, padY: CGFloat = 5, gap: CGFloat = 6
         let dotW: CGFloat = dot != nil ? dotR * 2 + gap : 0
-        // Wrap to up to two lines so long reasons read fully instead of truncating hard.
         let maxTextW = bounds.width - 8 - padX * 2 - dotW
         let lines = wrap(label, font: font, maxW: maxTextW, maxLines: 2)
         let tAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG.withAlphaComponent(alpha)]
@@ -775,31 +778,59 @@ final class PetView: NSView {
         let textH = lineH * CGFloat(lines.count)
         let bw = padX * 2 + dotW + textW
         let bh = padY * 2 + max(textH, dotR * 2)
-        let bx = min(max(4, bounds.midX - bw / 2), bounds.width - bw - 4)
-        let br = NSRect(x: bx, y: y, width: bw, height: bh)
-        let radius: CGFloat = 6
-        let pill = NSBezierPath(roundedRect: br, xRadius: radius, yRadius: radius)
-        Theme.termBG.withAlphaComponent(0.92 * alpha).setFill(); pill.fill()
 
+        // Trailing puffs occupy a small gap between the pet's head and the bubble.
+        let trailH: CGFloat = 15
+        let bx = min(max(4, bounds.midX - bw / 2), bounds.width - bw - 4)
+        let br = NSRect(x: bx, y: petTop + trailH, width: bw, height: bh)
+        let radius = min(bh / 2, 16)   // soft, cloud-like — not the picker's squared corners
+
+        let bg = Theme.termBG.withAlphaComponent(0.95 * alpha)
+        let edge = Theme.coral.withAlphaComponent(0.7 * alpha)
+
+        // Two trailing puffs rising from the pet's TOP-RIGHT up toward the bubble
+        // (like a thought drifting off the side of its head, not straight up the middle).
+        let petW = CGFloat(cfg.frameWidth) * CGFloat(cfg.scale)
+        let rightX = bounds.midX + petW * 0.24
+        let puffs: [(x: CGFloat, y: CGFloat, r: CGFloat)] = [
+            (rightX,     petTop + 9,   3.4),   // upper, larger (toward the bubble)
+            (rightX + 7, petTop + 2.5, 2.1),   // lower, smaller (at the pet's head)
+        ]
+        let puffPaths = puffs.map { p in
+            NSBezierPath(ovalIn: NSRect(x: p.x - p.r, y: p.y - p.r, width: p.r * 2, height: p.r * 2))
+        }
+        let bubble = NSBezierPath(roundedRect: br, xRadius: radius, yRadius: radius)
+
+        // Soft drop shadow under the whole thought so it floats above the desktop.
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.33 * alpha)
+        shadow.shadowOffset = NSSize(width: 0, height: -1.5)
+        shadow.shadowBlurRadius = 6
+        shadow.set()
+        bg.setFill(); puffPaths.forEach { $0.fill() }
+        bg.setFill(); bubble.fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        // Puff outlines (no shadow), matching the bubble edge.
+        for path in puffPaths { edge.setStroke(); path.lineWidth = 1; path.stroke() }
         if let p = progress {
-            // Border IS the context gauge: a dim full-perimeter track, then a fraction
-            // of the perimeter drawn over it (clockwise from the top) in green→amber→red.
-            let f = max(0, min(1, p))
+            // Border = context gauge: dim full-perimeter track + a fraction drawn over it.
             let track = NSBezierPath(roundedRect: br, xRadius: radius, yRadius: radius)
             track.lineWidth = 1.5
             Theme.termFG.withAlphaComponent(0.20 * alpha).setStroke(); track.stroke()
+            let f = max(0, min(1, p))
             if f > 0.001 {
                 let perim = 2 * ((br.width - 2 * radius) + (br.height - 2 * radius)) + 2 * .pi * radius
                 let prog = NSBezierPath(roundedRect: br, xRadius: radius, yRadius: radius)
-                prog.lineWidth = 1.6
-                prog.lineCapStyle = .round
+                prog.lineWidth = 1.8; prog.lineCapStyle = .round
                 prog.setLineDash([perim * CGFloat(f), perim], count: 2, phase: 0)
                 let col: NSColor = f >= 0.9 ? Theme.red
                     : (f >= 0.75 ? NSColor(red: 0.92, green: 0.62, blue: 0.22, alpha: 1) : Theme.green)
                 col.withAlphaComponent(alpha).setStroke(); prog.stroke()
             }
         } else {
-            Theme.coral.withAlphaComponent(0.85 * alpha).setStroke(); pill.lineWidth = 1; pill.stroke()
+            edge.setStroke(); bubble.lineWidth = 1; bubble.stroke()
         }
 
         if let d = dot {
@@ -808,10 +839,9 @@ final class PetView: NSView {
         }
         let textX = br.minX + padX + dotW
         var ly = br.maxY - padY - (sizes.first?.height ?? lineH)
-        for (i, line) in lines.enumerated() {
+        for line in lines {
             (line as NSString).draw(at: NSPoint(x: textX, y: ly), withAttributes: tAttrs)
             ly -= lineH
-            _ = i
         }
         return br.maxY
     }
@@ -839,7 +869,7 @@ final class StackView: NSView {
     let W: CGFloat = 232
     // The pet panel is short at rest (JUST the pet) and grows when the status pill
     // reveals on hover, fitting up to a 2-line pill.
-    var PETH: CGFloat { primary.isRevealed ? 150 : 112 }
+    var PETH: CGFloat { primary.isRevealed ? 168 : 112 }
     let rowH: CGFloat = 26, innerPad: CGFloat = 7, margin: CGFloat = 8, gap: CGFloat = 5
     private var downInWin = NSPoint.zero    // mouse-down point in view coords
     private var lastScreen = NSPoint.zero   // for window dragging (screen coords)
@@ -862,10 +892,13 @@ final class StackView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func listPanelH() -> CGFloat { showList ? CGFloat(items.count) * rowH + innerPad * 2 : 0 }
-    func desiredHeight() -> CGFloat { showList ? margin * 2 + PETH + gap + listPanelH() : margin * 2 + PETH }
-    func panelRect() -> NSRect { NSRect(x: margin, y: margin + PETH + gap, width: W - margin * 2, height: listPanelH()) }
+    func desiredHeight() -> CGFloat { margin * 2 + PETH + (showList ? gap + listPanelH() : 0) }
+    // Session picker sits BELOW the pet (bubble above, pet centred, picker beneath) for a
+    // balanced stack; the pet stays put while the picker reveals downward (see applyWindowFrame).
+    func listOffset() -> CGFloat { showList ? listPanelH() + gap : 0 }
+    func panelRect() -> NSRect { NSRect(x: margin, y: margin, width: W - margin * 2, height: listPanelH()) }
     func layoutContents() {
-        primary.frame = NSRect(x: 0, y: margin, width: W, height: PETH)   // pet anchored in the corner
+        primary.frame = NSRect(x: 0, y: margin + listOffset(), width: W, height: PETH)   // pet above the picker
         needsDisplay = true
     }
 
@@ -1273,17 +1306,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.sync() }
     }
 
-    // Keep the window matched to the stack's desired height (which changes as the pet's
-    // details reveal). Bottom-anchored so the pet stays put and the panel grows upward.
+    // Keep the window matched to the stack's desired height as the bubble (above) and
+    // picker (below) reveal. The pet stays visually put: the bubble grows upward from the
+    // current top, while the picker grows downward — we shift the window's bottom by the
+    // change in the picker's height so the pet doesn't move.
+    private var lastListOffset: CGFloat = 0
+    private func applyWindowFrame() {
+        guard window != nil else { return }
+        let listOffset = stack.listOffset()
+        let h = stack.desiredHeight()
+        var f = window.frame
+        f.origin.y = f.minY - (listOffset - lastListOffset)   // picker reveals downward; pet stays
+        f.size = NSSize(width: stack.W, height: h)
+        window.setFrame(f, display: true)
+        stack.frame = NSRect(origin: .zero, size: f.size)
+        stack.layoutContents()
+        lastListOffset = listOffset
+    }
     private func resizeIfNeeded() {
         guard window != nil, !order.isEmpty, !hidden else { return }
-        let h = stack.desiredHeight()
-        if abs(window.frame.height - h) > 0.5 {
-            var f = window.frame
-            f.origin.y = f.minY; f.size = NSSize(width: stack.W, height: h)
-            window.setFrame(f, display: true)
-            stack.frame = NSRect(origin: .zero, size: f.size)
-            stack.layoutContents()
+        if abs(window.frame.height - stack.desiredHeight()) > 0.5 || stack.listOffset() != lastListOffset {
+            applyWindowFrame()
         }
     }
 
@@ -1419,13 +1462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if appliedKey != key { appliedKey = key; stack.primary.setState(sel.st.state) }
         updateMenuBarIcon(sel.st.state)
 
-        // Resize bottom-anchored (the corner stays put; the list grows upward).
-        let h = stack.desiredHeight()
-        var f = window.frame
-        f.origin.y = f.minY; f.size = NSSize(width: stack.W, height: h)
-        window.setFrame(f, display: true)
-        stack.frame = NSRect(origin: .zero, size: f.size)
-        stack.layoutContents()
+        applyWindowFrame()                     // bubble grows up, picker grows down, pet stays put
         stack.needsDisplay = true
         if !hidden { window.orderFrontRegardless() }
         saveLayoutIfChanged()
@@ -1778,11 +1815,11 @@ func selfTest() -> Bool {
     check("click row selects that session", selected == "b")
     check("click does NOT reorder", reordered == nil)
 
-    // 2) Click the pet area (below the list) -> no selection change, but it pokes the pet.
+    // 2) Click the pet (now above the picker) -> no selection change, but it pokes the pet.
     selected = nil
     var poked = false
     sv.onPetTapped = { poked = true }
-    click(NSPoint(x: sv.W / 2, y: sv.margin + 10))
+    click(NSPoint(x: sv.W / 2, y: sv.primary.frame.midY))
     check("click on pet does not select a row", selected == nil)
     check("tap on pet triggers a reaction", poked)
 
