@@ -733,12 +733,28 @@ final class PetView: NSView {
         }
     }
 
-    // The status pill text: the activity/reason (detail) takes over the bare state
-    // label when present ("editing" instead of "working"; the notification reason
-    // instead of "needs you"), with the time-in-state appended when enabled.
+    // What the pet is "thinking", in plain pet-voice copy that reads naturally in the
+    // bubble — not the raw hook text. Running states keep the concrete activity
+    // ("editing main.swift"); the rest map to a short, human phrase. Time-in-state is
+    // appended so you can see how long it's been like this.
     private func pillText() -> String? {
-        guard var base = detail ?? bubbleLabel else { return nil }
-        if let e = elapsedText { base += " · " + e }   // wrapped to 2 lines by drawBubble, not truncated
+        let phrase: String?
+        switch anim {
+        case "waiting":
+            phrase = "answer Claude"                       // it needs your input / permission
+        case "failed":
+            phrase = detail.map { "stopped — \($0)" } ?? "Claude stopped"
+        case "review", "jumping", "done", "ready":
+            phrase = "all done — your turn"
+        case "waving":
+            phrase = "hey there"
+        case "running", "running-left", "running-right":
+            phrase = detail ?? "working…"                  // detail = "editing main.swift", "running npm"…
+        default:
+            phrase = detail ?? bubbleLabel
+        }
+        guard var base = phrase else { return nil }
+        if let e = elapsedText { base += "  ·  " + e }
         return base
     }
 
@@ -793,8 +809,8 @@ final class PetView: NSView {
         let petW = CGFloat(cfg.frameWidth) * CGFloat(cfg.scale)
         let rightX = bounds.midX + petW * 0.24
         let puffs: [(x: CGFloat, y: CGFloat, r: CGFloat)] = [
-            (rightX,     petTop + 9,   3.4),   // upper, larger (toward the bubble)
-            (rightX + 7, petTop + 2.5, 2.1),   // lower, smaller (at the pet's head)
+            (rightX + 8, petTop + 9,   3.4),   // upper, larger (toward the bubble) — leans up-right
+            (rightX,     petTop + 2.5, 2.1),   // lower, smaller (at the pet's head)
         ]
         let puffPaths = puffs.map { p in
             NSBezierPath(ovalIn: NSRect(x: p.x - p.r, y: p.y - p.r, width: p.r * 2, height: p.r * 2))
@@ -865,6 +881,7 @@ final class StackView: NSView {
     var onPetTapped: (() -> Void)?
     var pinDetails = false                  // keep the details panel open regardless of hover
     var petHovered = false                  // mouse currently over the pet region
+    var listExpanded = false                // picker: collapsed (active session only) vs all sessions
 
     let W: CGFloat = 232
     // The pet panel is short at rest (JUST the pet) and grows when the status pill
@@ -882,16 +899,21 @@ final class StackView: NSView {
     private var hoverRowSince = Date()       // when the current row hover began (for dwell reveal)
     private var scrollAccum: CGFloat = 0
 
-    // The session picker is also part of the reveal: hidden at rest (just the pet),
-    // shown only while hovering/pinned. Names live in the picker, so the big pet shows
+    // The picker is part of the reveal: hidden at rest, shown while hovering/pinned. It
+    // COLLAPSES to just the active session by default and EXPANDS to all sessions on a
+    // click (only when there's more than one). Names live in the picker — the pet shows
     // no caption of its own.
-    var showList: Bool { items.count > 1 && primary.isRevealed }
+    var showList: Bool { !items.isEmpty && primary.isRevealed }
+    var expandable: Bool { items.count > 1 }
+    private var rowCount: Int { listExpanded ? items.count : 1 }
+    private var selectedItem: SessionItem? { items.first { $0.id == selectedID } ?? items.first }
+    private func visibleItems() -> [SessionItem] { listExpanded ? items : (selectedItem.map { [$0] } ?? []) }
     var isReordering: Bool { dragging }    // true mid-drag: sync() must not clobber `items`
 
     override init(frame f: NSRect) { super.init(frame: f); addSubview(primary) }
     required init?(coder: NSCoder) { fatalError() }
 
-    func listPanelH() -> CGFloat { showList ? CGFloat(items.count) * rowH + innerPad * 2 : 0 }
+    func listPanelH() -> CGFloat { showList ? CGFloat(rowCount) * rowH + innerPad * 2 : 0 }
     func desiredHeight() -> CGFloat { margin * 2 + PETH + (showList ? gap + listPanelH() : 0) }
     // Session picker sits BELOW the pet (bubble above, pet centred, picker beneath) for a
     // balanced stack; the pet stays put while the picker reveals downward (see applyWindowFrame).
@@ -909,16 +931,29 @@ final class StackView: NSView {
             options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
     }
 
+    // Index into the VISIBLE rows (0..<rowCount). Collapsed → only row 0 (active session).
     private func rowIndex(at p: NSPoint, clamp: Bool = false) -> Int? {
         guard showList else { return nil }
         let panel = panelRect()
         if !clamp && !panel.contains(p) { return nil }
         var i = Int((panel.maxY - innerPad - p.y) / rowH)
-        if clamp { i = max(0, min(items.count - 1, i)) }
-        return (i >= 0 && i < items.count) ? i : nil
+        if clamp { i = max(0, min(rowCount - 1, i)) }
+        return (i >= 0 && i < rowCount) ? i : nil
     }
 
-    private func drawRow(_ it: SessionItem, in row: NSRect, selected: Bool, hovered: Bool, lifted: Bool, showDetail: Bool, font: NSFont) {
+    // A downward (or upward) chevron centred at (cx, cy).
+    private func drawChevron(down: Bool, cx: CGFloat, cy: CGFloat, w: CGFloat, color: NSColor) {
+        let p = NSBezierPath(); p.lineWidth = 1.4; p.lineCapStyle = .round; p.lineJoinStyle = .round
+        let h = w * 0.55
+        let yTip = down ? cy - h / 2 : cy + h / 2, yArm = down ? cy + h / 2 : cy - h / 2
+        p.move(to: NSPoint(x: cx - w / 2, y: yArm))
+        p.line(to: NSPoint(x: cx, y: yTip))
+        p.line(to: NSPoint(x: cx + w / 2, y: yArm))
+        color.setStroke(); p.stroke()
+    }
+
+    private func drawRow(_ it: SessionItem, in row: NSRect, selected: Bool, hovered: Bool, lifted: Bool,
+                         showDetail: Bool, draggable: Bool, rightInset: CGFloat, font: NSFont) {
         let inner = row.insetBy(dx: 3, dy: 1)
         if lifted {                                            // the row being dragged: pops out
             Theme.termBG.setFill()
@@ -933,24 +968,29 @@ final class StackView: NSView {
             Theme.coral.withAlphaComponent(0.10).setFill()
             NSBezierPath(roundedRect: inner, xRadius: 6, yRadius: 6).fill()
         }
-        // grip dots — signals the row is draggable (brighter on hover/lift)
-        NSColor.white.withAlphaComponent(hovered || lifted ? 0.55 : 0.28).setFill()
-        for r in 0..<2 { for dy in [-3.5, 0.0, 3.5] {
-            NSBezierPath(ovalIn: NSRect(x: row.minX + 8 + CGFloat(r) * 3.2, y: row.midY + CGFloat(dy) - 0.85, width: 1.7, height: 1.7)).fill()
-        } }
+        let nameX: CGFloat
+        if draggable {
+            // grip dots — signals the row is draggable (brighter on hover/lift)
+            NSColor.white.withAlphaComponent(hovered || lifted ? 0.55 : 0.28).setFill()
+            for r in 0..<2 { for dy in [-3.5, 0.0, 3.5] {
+                NSBezierPath(ovalIn: NSRect(x: row.minX + 8 + CGFloat(r) * 3.2, y: row.midY + CGFloat(dy) - 0.85, width: 1.7, height: 1.7)).fill()
+            } }
+            nameX = row.minX + 32
+        } else {
+            nameX = row.minX + 14
+        }
         let dotR: CGFloat = 4
         accentFor(it.state).setFill()
-        NSBezierPath(ovalIn: NSRect(x: row.minX + 20, y: row.midY - dotR, width: dotR * 2, height: dotR * 2)).fill()
-        // By default a row shows ONLY the name (no second text to collide with it).
-        // The activity detail reveals on the right after you hover the row a moment;
-        // the name then truncates to leave it room, so the two never overlap.
-        let nameX = row.minX + 32
-        var nameMaxW = row.maxX - 12 - nameX
+        NSBezierPath(ovalIn: NSRect(x: nameX - 12, y: row.midY - dotR, width: dotR * 2, height: dotR * 2)).fill()
+        // Activity detail reveals on the right after a hover-dwell; the name truncates
+        // to leave it room, so the two never overlap. `rightInset` reserves room for the
+        // expand chevron on the collapsed row.
+        var nameMaxW = row.maxX - 12 - rightInset - nameX
         if showDetail, let d = it.detail, !d.isEmpty {
             let stStr = truncated(d, font: font, maxW: 120) as NSString
             let stAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG.withAlphaComponent(0.5)]
             let stSize = stStr.size(withAttributes: stAttrs)
-            let stX = row.maxX - 12 - stSize.width
+            let stX = row.maxX - 12 - rightInset - stSize.width
             stStr.draw(at: NSPoint(x: stX, y: row.midY - stSize.height / 2), withAttributes: stAttrs)
             nameMaxW = stX - nameX - 10
         }
@@ -968,21 +1008,46 @@ final class StackView: NSView {
         Theme.termBG.setFill(); bg.fill()
         Theme.coral.withAlphaComponent(0.7).setStroke(); bg.lineWidth = 1; bg.stroke()
 
-        // Reveal a row's activity detail only after the pointer rests on it a moment,
-        // so it doesn't flicker as you sweep across the list.
         let dwell = Date().timeIntervalSince(hoverRowSince) > 0.45
         let font = NSFont(name: "Menlo", size: 10) ?? .systemFont(ofSize: 10)
+
+        if !listExpanded {
+            // Collapsed: just the active session, with an expand affordance (chevron +
+            // count) on the right when there's more than one session.
+            guard let it = selectedItem else { return }
+            let rowY = panel.maxY - innerPad - rowH
+            let row = NSRect(x: panel.minX, y: rowY, width: panel.width, height: rowH)
+            let inset: CGFloat = expandable ? 30 : 0
+            drawRow(it, in: row, selected: true, hovered: hoveredRow == 0, lifted: false,
+                    showDetail: false, draggable: false, rightInset: inset, font: font)
+            if expandable {
+                let n = "\(items.count)" as NSString
+                let nAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.coral.withAlphaComponent(0.9)]
+                let ns = n.size(withAttributes: nAttrs)
+                n.draw(at: NSPoint(x: row.maxX - 26 - ns.width, y: row.midY - ns.height / 2), withAttributes: nAttrs)
+                drawChevron(down: true, cx: row.maxX - 15, cy: row.midY, w: 8, color: Theme.coral.withAlphaComponent(0.9))
+            }
+            return
+        }
+
+        // Expanded: all sessions (full select / scroll / drag), with a collapse chevron.
         for (i, it) in items.enumerated() {
             if dragging && i == dragIndex { continue }          // leave a gap; drawn floating below
             let rowY = panel.maxY - innerPad - CGFloat(i + 1) * rowH
             let row = NSRect(x: panel.minX, y: rowY, width: panel.width, height: rowH)
             let isHov = !dragging && i == hoveredRow
-            drawRow(it, in: row, selected: it.id == selectedID, hovered: isHov, lifted: false, showDetail: isHov && dwell, font: font)
+            let inset: CGFloat = i == 0 ? 22 : 0
+            drawRow(it, in: row, selected: it.id == selectedID, hovered: isHov, lifted: false,
+                    showDetail: isHov && dwell, draggable: true, rightInset: inset, font: font)
         }
+        // Collapse chevron on the top row.
+        drawChevron(down: false, cx: panel.maxX - 15, cy: panel.maxY - innerPad - rowH / 2, w: 8,
+                    color: Theme.coral.withAlphaComponent(0.9))
         if dragging, let di = dragIndex {                       // the lifted row follows the cursor
             let cy = min(max(dragCursorY, panel.minY + rowH / 2), panel.maxY - rowH / 2)
             let row = NSRect(x: panel.minX, y: cy - rowH / 2, width: panel.width, height: rowH)
-            drawRow(items[di], in: row, selected: items[di].id == selectedID, hovered: false, lifted: true, showDetail: false, font: font)
+            drawRow(items[di], in: row, selected: items[di].id == selectedID, hovered: false, lifted: true,
+                    showDetail: false, draggable: true, rightInset: 0, font: font)
         }
     }
 
@@ -1007,11 +1072,15 @@ final class StackView: NSView {
         if primary.hovering != target { primary.hovering = target }
     }
 
+    private var pressedRow: Int? = nil       // visible row pressed on mouseDown
     override func mouseDown(with e: NSEvent) {
         downInWin = convert(e.locationInWindow, from: nil)
         lastScreen = NSEvent.mouseLocation; moved = 0
-        if let i = rowIndex(at: downInWin) { dragIndex = i; windowDrag = false }
-        else { dragIndex = nil; windowDrag = true }            // pet/empty -> move the widget
+        if let i = rowIndex(at: downInWin) {
+            pressedRow = i
+            dragIndex = listExpanded ? i : nil    // reorder only when expanded
+            windowDrag = false
+        } else { pressedRow = nil; dragIndex = nil; windowDrag = true }   // pet/empty -> move the widget
     }
     override func mouseDragged(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
@@ -1020,7 +1089,7 @@ final class StackView: NSView {
             let now = NSEvent.mouseLocation
             if let win = window { var o = win.frame.origin; o.x += now.x - lastScreen.x; o.y += now.y - lastScreen.y; win.setFrameOrigin(o) }
             lastScreen = now
-        } else if let di = dragIndex, moved > 3 {               // reorder this row live
+        } else if listExpanded, let di = dragIndex, moved > 3 {   // reorder this row live
             dragging = true; dragCursorY = p.y
             if let t = rowIndex(at: p, clamp: true), t != di {
                 let it = items.remove(at: di); items.insert(it, at: t); dragIndex = t
@@ -1029,18 +1098,22 @@ final class StackView: NSView {
         }
     }
     override func mouseUp(with e: NSEvent) {
-        if let di = dragIndex {
-            if moved > 3 { onReorder?(items.map { $0.id }) }    // committed a manual reorder
-            else { onSelect?(items[di].id) }                   // a click -> select
-        } else if windowDrag, moved <= 3, primary.frame.contains(downInWin) {
-            onPetTapped?()                                      // a tap on the pet (not a drag) -> react
+        if windowDrag {
+            if moved <= 3, primary.frame.contains(downInWin) { onPetTapped?() }   // tap the pet -> react
+        } else if let pr = pressedRow {
+            if listExpanded {
+                if moved > 3 { onReorder?(items.map { $0.id }) }                  // committed a reorder
+                else if pr < items.count { onSelect?(items[pr].id); listExpanded = false }   // pick + collapse
+            } else if expandable {
+                listExpanded = true                                              // collapsed click -> expand
+            }
         }
-        dragIndex = nil; windowDrag = false; dragging = false; needsDisplay = true
+        pressedRow = nil; dragIndex = nil; windowDrag = false; dragging = false; needsDisplay = true
     }
 
-    // Scroll over the widget to step the selection through sessions.
+    // Scroll over the widget to step the selection through sessions (works collapsed too).
     override func scrollWheel(with e: NSEvent) {
-        guard showList else { return }
+        guard showList, expandable else { return }
         scrollAccum += e.scrollingDeltaY
         if scrollAccum > 6 { onCycle?(-1); scrollAccum = 0 }
         else if scrollAccum < -6 { onCycle?(1); scrollAccum = 0 }
@@ -1275,6 +1348,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // (and re-wire if the app was moved, since the hook stores an absolute path).
         // Lets users just open the notarized .app — no quarantine-gated installer script.
         if !hooksPointToSelf() { installHooks() }
+        // Claim the statusLine for the exact context gauge — only if free or already
+        // ours (installHooks() already tried; this also self-heals a moved app path).
+        installStatusLine()
         prefs = Prefs.load(); prefs.applyToGlobals()
         setupMenu()
         registerHotKey()
@@ -1301,6 +1377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             self.stack.primary.advance()
+            if !self.stack.primary.isRevealed { self.stack.listExpanded = false }   // next reveal starts collapsed
             self.resizeIfNeeded()          // grow/shrink the panel as details reveal/collapse
         }
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.sync() }
@@ -1488,9 +1565,8 @@ let HOOK_WIRING: [(event: String, state: String, matcher: Bool)] = [
 
 func selfExecPath() -> String { Bundle.main.executablePath ?? CommandLine.arguments[0] }
 
-// Claude Code delivers event JSON on stdin. Read it without ever blocking the
-// session: every read is gated by poll with a hard time cap, so a hook can never
-// hang (e.g. if the writer keeps the pipe open).
+// Claude Code delivers event JSON on stdin; readHookInput() folds it into this.
+// (The non-blocking read itself lives in readStdinData(), below.)
 struct HookInput {
     var session = "default"
     var cwd: String?
@@ -1504,12 +1580,14 @@ struct HookInput {
     var permissionMode: String?   // "default"|"plan"|"acceptEdits"|"bypassPermissions"
     var trigger: String?          // PreCompact: "manual"|"auto"
 }
-func readHookInput() -> HookInput {
-    var info = HookInput()
+// Drain stdin without ever blocking the session: every read is gated by poll with a
+// hard time cap, so a hook OR statusline can never hang (e.g. if the writer keeps the
+// pipe open). Shared by readHookInput() and statusLine() — keep the guard in one place.
+func readStdinData(maxBytes: Int = 1 << 20) -> Data {
     let fd: Int32 = 0
     var data = Data()
     var buf = [UInt8](repeating: 0, count: 4096)
-    while data.count < 1 << 20 {
+    while data.count < maxBytes {
         var fds = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
         let r = poll(&fds, 1, data.isEmpty ? 50 : 0)
         if r <= 0 { break }
@@ -1517,6 +1595,11 @@ func readHookInput() -> HookInput {
         let n = read(fd, &buf, buf.count)
         if n > 0 { data.append(buf, count: n) } else { break }
     }
+    return data
+}
+func readHookInput() -> HookInput {
+    var info = HookInput()
+    let data = readStdinData()
     if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         if let s = obj["session_id"] as? String, !s.isEmpty { info.session = s }
         info.cwd = obj["cwd"] as? String
@@ -1610,6 +1693,49 @@ func writeState(_ state: String) {
     if let data = try? JSONSerialization.data(withJSONObject: obj) { try? data.write(to: file) }
 }
 
+// Claude Code hands the TRUE context-window usage (the right 200k-vs-1M denominator,
+// already reduced to a percentage) only to the statusLine command — never to hooks.
+// So we register a tiny statusLine that relays that percentage to the bridge file
+// bridgeContextUsed() reads, giving the pet's gauge an EXACT fill instead of the
+// token-count estimate. Registering it also makes this our user's statusline, so we
+// print a short, useful line too. Runs synchronously inside Claude Code like a hook,
+// so it uses the same non-blocking stdin read and never touches the network.
+func statusLine() {
+    let data = readStdinData()
+    guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+    let session = (o["session_id"] as? String) ?? ""
+    let ctx = o["context_window"] as? [String: Any]
+
+    // Prefer CC's pre-computed percentage; fall back to computing it from the
+    // per-component usage + window size when it isn't populated yet (early/after
+    // /compact). Input-only, matching how CC's own /context measures the window.
+    var usedPct = (ctx?["used_percentage"] as? Double) ?? (ctx?["used_percentage"] as? Int).map(Double.init)
+    if usedPct == nil, let ctx = ctx,
+       let size = ctx["context_window_size"] as? Int, size > 0,
+       let cur = ctx["current_usage"] as? [String: Any] {
+        let inp = (cur["input_tokens"] as? Int) ?? 0
+        let cc  = (cur["cache_creation_input_tokens"] as? Int) ?? 0
+        let cr  = (cur["cache_read_input_tokens"] as? Int) ?? 0
+        usedPct = Double(inp + cc + cr) / Double(size) * 100
+    }
+
+    // Relay to the bridge file the gauge reads (same path/shape as bridgeContextUsed()).
+    if let pct = usedPct, !session.isEmpty, !session.contains("/"), !session.contains("..") {
+        let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("claude-ctx-\(session).json")
+        let payload: [String: Any] = ["used_pct": pct, "timestamp": Date().timeIntervalSince1970]
+        if let d = try? JSONSerialization.data(withJSONObject: payload) { try? d.write(to: URL(fileURLWithPath: path)) }
+    }
+
+    // Print a compact line — this IS the user's statusline now, so make it worth showing.
+    var bits: [String] = []
+    if let dir = (o["workspace"] as? [String: Any])?["current_dir"] as? String ?? o["cwd"] as? String {
+        bits.append(URL(fileURLWithPath: dir).lastPathComponent)
+    }
+    if let m = (o["model"] as? [String: Any])?["display_name"] as? String, !m.isEmpty { bits.append(m) }
+    if let pct = usedPct { bits.append("\(Int(pct.rounded()))% ctx") }
+    print("🐾 " + bits.joined(separator: "  ·  "))
+}
+
 var singletonLockFD: Int32 = -1
 func acquireSingletonOrExit() {
     try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
@@ -1655,9 +1781,70 @@ func installHooks() {
     }
     for w in HOOK_WIRING { appendGroup(w.event, w.state, matcher: w.matcher) }
     root["hooks"] = hooks
+    // statusLine is a SINGLE slot (unlike the hooks list), so only claim it when the
+    // user has none — never clobber their own. This wins the EXACT context gauge out of
+    // the box; users with their own statusline keep it and fall back to the estimate.
+    installStatusLineInto(&root, exe: exe)
     if let out = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
         try? out.write(to: settingsURL)
         print("🐾 Claude Pet hooks installed (\(HOOK_WIRING.count) events) → \(settingsURL.path)")
+    }
+}
+
+// Add/refresh our statusLine in an already-loaded settings dict, but only if the slot
+// is empty or already ours. Returns true if we (re)claimed it. Mutating-in-place lets
+// installHooks() write once; the GUI self-heal path uses installStatusLine() below.
+@discardableResult
+func installStatusLineInto(_ root: inout [String: Any], exe: String) -> Bool {
+    if let existing = root["statusLine"] as? [String: Any],
+       (existing["command"] as? String)?.contains("--statusline") != true {
+        return false   // user has their own statusline — leave it untouched
+    }
+    root["statusLine"] = ["type": "command", "command": "\"\(exe)\" --statusline", "padding": 0]
+    return true
+}
+
+// Standalone (re)install — reads settings, claims the statusLine if free/ours, writes back.
+func installStatusLine() {
+    let exe = selfExecPath()
+    try? FileManager.default.createDirectory(at: settingsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    var root: [String: Any] = [:]
+    if let d = try? Data(contentsOf: settingsURL),
+       let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] { root = o }
+    guard installStatusLineInto(&root, exe: exe) else { return }
+    if let out = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
+        try? out.write(to: settingsURL)
+    }
+}
+
+// True only when settings.json's statusLine is OUR command pointing at this binary.
+func statusLinePointsToSelf() -> Bool {
+    guard let d = try? Data(contentsOf: settingsURL),
+          let root = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+          let sl = root["statusLine"] as? [String: Any],
+          let cmd = sl["command"] as? String else { return false }
+    return cmd.contains("--statusline") && cmd.contains(selfExecPath())
+}
+
+// Human-readable statusLine state for --status: ours → exact gauge; user's own or
+// none → the token-count estimate.
+func statusLineState() -> String {
+    if statusLinePointsToSelf() { return "ours (exact context gauge)" }
+    if let d = try? Data(contentsOf: settingsURL),
+       let root = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+       root["statusLine"] != nil { return "user's own — gauge uses estimate" }
+    return "none — gauge uses estimate"
+}
+
+// Remove the statusLine only if it's ours (never touch a user's own statusline).
+func uninstallStatusLine() {
+    guard let d = try? Data(contentsOf: settingsURL),
+          var root = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
+    guard let sl = root["statusLine"] as? [String: Any],
+          (sl["command"] as? String)?.contains("--statusline") == true else { return }
+    root.removeValue(forKey: "statusLine")
+    if let out = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
+        try? out.write(to: settingsURL)
     }
 }
 
@@ -1682,6 +1869,7 @@ func hooksPointToSelf() -> Bool {
 }
 
 func uninstallHooks() {
+    uninstallStatusLine()   // drop our statusLine too (no-op if it's the user's own)
     guard let d = try? Data(contentsOf: settingsURL),
           var root = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
           var hooks = root["hooks"] as? [String: Any] else { return }
@@ -1709,6 +1897,7 @@ func statusReport() {
     print("Claude Pet — status")
     print("  overlay running : \(guiAlive() ? "yes" : "no")")
     print("  hooks wired     : \(hooksPointToSelf() ? "yes (this build)" : "no / different build")")
+    print("  statusline      : \(statusLineState())")
     print("  custom sprite   : \(loadActiveSprite() != nil ? "loaded" : "default mascot")")
     print("  theme           : \(prefs.theme)")
     print("  alerts          : sound=\(prefs.soundOnAttention) bounce=\(prefs.bounceOnAttention) muted=\(prefs.muted)")
@@ -1778,6 +1967,7 @@ func selfTest() -> Bool {
                  SessionItem(id: "c", state: "idle", label: "charlie")]
     sv.items = items; sv.selectedID = "a"
     sv.primary.hovering = true                  // reveal the picker so rows are interactive
+    sv.listExpanded = true                      // expand so individual rows are clickable/draggable
     let h = sv.desiredHeight()
     sv.frame = NSRect(x: 0, y: 0, width: sv.W, height: h)
     let win = NSWindow(contentRect: sv.frame, styleMask: .borderless, backing: .buffered, defer: false)
@@ -1815,6 +2005,12 @@ func selfTest() -> Bool {
     check("click row selects that session", selected == "b")
     check("click does NOT reorder", reordered == nil)
 
+    // 1b) Collapsed picker: a click expands (no selection), not a select.
+    sv.listExpanded = false; selected = nil
+    click(rowCenter(0))
+    check("collapsed click expands the picker", sv.listExpanded && selected == nil)
+    sv.listExpanded = true
+
     // 2) Click the pet (now above the picker) -> no selection change, but it pokes the pet.
     selected = nil
     var poked = false
@@ -1824,14 +2020,14 @@ func selfTest() -> Bool {
     check("tap on pet triggers a reaction", poked)
 
     // 3) Drag row 0 ("a") down to the bottom -> order changes, "a" moves off the top.
-    sv.items = items; sv.selectedID = "a"; reordered = nil
+    sv.items = items; sv.selectedID = "a"; reordered = nil; sv.listExpanded = true
     drag(rowCenter(0), [rowCenter(1)], rowCenter(2))
     check("drag reorders the list", reordered != nil)
     check("dragged row left the top slot", (reordered?.first ?? "a") != "a")
 
     // 4) Mid-drag, isReordering is true so the timer's sync() won't rebuild `items`
     //    from the uncommitted `order` and snap the grabbed row back (the reorder bug).
-    sv.items = items; sv.selectedID = "a"
+    sv.items = items; sv.selectedID = "a"; sv.listExpanded = true
     sv.mouseDown(with: evt(.leftMouseDown, rowCenter(0)))
     sv.mouseDragged(with: evt(.leftMouseDragged, rowCenter(1)))
     check("isReordering guards sync mid-drag", sv.isReordering)
@@ -1885,6 +2081,17 @@ func selfTest() -> Bool {
     check("totals span duration", Int(totals.duration ?? 0) == 600)
     check("totals estimate cost", totals.costUSD > 0)
 
+    // 10) statusLine claim is only-if-empty-or-ours — never clobbers a user's own.
+    var slEmpty: [String: Any] = [:]
+    check("statusline claims empty slot", installStatusLineInto(&slEmpty, exe: "/x") &&
+          (((slEmpty["statusLine"] as? [String: Any])?["command"] as? String)?.contains("--statusline") ?? false))
+    var slForeign: [String: Any] = ["statusLine": ["type": "command", "command": "starship prompt"]]
+    check("statusline leaves user's own", !installStatusLineInto(&slForeign, exe: "/x") &&
+          ((slForeign["statusLine"] as? [String: Any])?["command"] as? String) == "starship prompt")
+    var slOurs: [String: Any] = ["statusLine": ["type": "command", "command": "\"/old\" --statusline"]]
+    check("statusline reclaims+refreshes ours", installStatusLineInto(&slOurs, exe: "/new") &&
+          (((slOurs["statusLine"] as? [String: Any])?["command"] as? String)?.contains("/new") ?? false))
+
     print(ok ? "SELFTEST: ALL PASS" : "SELFTEST: FAILURES")
     return ok
 }
@@ -1907,6 +2114,7 @@ func renderStack(to path: String) {
         SessionItem(id: "c", state: "failed", label: "data-pipeline", detail: "rate limited"),
         SessionItem(id: "d", state: "idle", label: "docs-site", detail: nil),
     ]
+    sv.listExpanded = ProcessInfo.processInfo.environment["CLAUDEPET_EXPAND"] != nil   // QA preview
     let h = sv.desiredHeight()
     sv.frame = NSRect(x: 0, y: 0, width: sv.W, height: h)
     sv.layoutContents()
@@ -1992,6 +2200,7 @@ if args.count >= 2 {
         writeState(args.count >= 3 ? args[2] : "idle"); ensureRunning(); exit(0)
     case "--install-hooks":   installHooks(); exit(0)
     case "--uninstall-hooks": uninstallHooks(); exit(0)
+    case "--statusline":      statusLine(); exit(0)
     case "--render":
         renderState(args.count >= 3 ? args[2] : "running", to: args.count >= 4 ? args[3] : "/tmp/pet.png"); exit(0)
     case "--make-icon":

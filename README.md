@@ -87,6 +87,13 @@ writes to the transcript:
 
 All read cheaply from the tail of the session transcript and the hook payloads.
 
+The gauge is **exact** when Claude Pet supplies your status line. Claude Code only
+hands the true context window (and whether it's the 200k or 1M beta) to a *status
+line* command, so on first launch the pet installs a tiny one **only if you don't
+already have one** — it never replaces your own. With it, the gauge shows the real
+percentage (matching `/context`); without it, the pet falls back to a token-count
+estimate. `ClaudePet --status` shows which is active.
+
 ## Get a nudge when it needs you
 
 When a session crosses into **needs you** or **errors**, Claude Pet can **chime**

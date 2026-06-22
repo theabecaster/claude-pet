@@ -19,6 +19,7 @@ swift build -c release                                  # build (the only build 
 .build/release/ClaudePet --render-stack /tmp/s.png      # offscreen preview of the multi-session stack
 .build/release/ClaudePet --render-menubar /tmp/m.png   # preview the menu-bar icon (each state, dark+light bar)
 .build/release/ClaudePet --status                      # terminal health + live session report (read-only)
+.build/release/ClaudePet --statusline                  # statusLine command: relays exact context % to the bridge file (hook-invoked)
 .build/release/ClaudePet --selftest                    # drive real NSEvent click/drag through handlers + logic checks (CI gate)
 .build/release/ClaudePet --make-icon /tmp/icon.png      # render the app icon
 .build/release/ClaudePet --aititle /path/to/transcript.jsonl   # debug AI-title parsing
@@ -42,9 +43,9 @@ interaction handlers or the `--state` / hook-routing path. CI also requires a cl
 
 The binary is **dual-mode**, dispatched by `argv[1]` at the bottom of `main.swift`:
 
-- **CLI mode** (`--state`, `--install-hooks`, `--uninstall-hooks`, `--render`, `--render-stack`,
-  `--render-menubar`, `--selftest`, `--status`, `--make-icon`, `--aititle`, `--meta`): does its
-  work and `exit(0)` — never starts the GUI event loop.
+- **CLI mode** (`--state`, `--install-hooks`, `--uninstall-hooks`, `--statusline`, `--render`,
+  `--render-stack`, `--render-menubar`, `--selftest`, `--status`, `--make-icon`, `--aititle`,
+  `--meta`): does its work and `exit(0)` — never starts the GUI event loop.
 - **GUI mode** (no args): acquires a singleton lock, runs the `NSApplication` overlay.
 
 ### The data flow (no polling of Claude, no network)
@@ -110,6 +111,21 @@ polling, no network:
   (`modelPrices()` per-MTok table × usage), and the active span (first→last `timestamp`).
   Heavier than the tail scan, so it's only used on demand — `--status` and not the 4 Hz
   overlay loop. `compactUSD()` formats the estimate.
+- **statusLine bridge → EXACT context %.** Claude Code hands the true context window
+  (200k vs the 1M beta, already as a percentage) ONLY to its `statusLine` command, never to
+  hooks — so the transcript-token gauge above is only an estimate (it infers the window via
+  `contextLimitFor()`). To get exact, we register our own `statusLine` (`--statusline` →
+  `statusLine()`): it reads CC's piped JSON, takes `context_window.used_percentage` (falling
+  back to computing it from `current_usage` ÷ `context_window_size`), and relays it to
+  `$TMPDIR/claude-ctx-<session>.json` (`{used_pct, timestamp}`). `bridgeContextUsed()` reads
+  that file when fresh (<1h); `sync()` prefers it over the token estimate (`main.swift`,
+  ctxProgress branch). The statusLine also prints a short `🐾 dir · model · N% ctx` line,
+  since claiming the slot makes it the user's statusline. **It's a SINGLE slot** (unlike the
+  hooks list), so `installStatusLineInto()` claims it **only when empty or already ours** —
+  it never clobbers a user's existing statusline (e.g. GSD's, which already writes the same
+  bridge). `installHooks()` and the GUI launch path both call it (self-healing the absolute
+  exe path); `uninstallHooks()`/uninstall-self drop it only if it's ours. `--status` reports
+  the state (`statusLineState()`: ours / user's own / none).
 
 The selected `PetView` stacks **pet → pill (`detail`/label + `· elapsed`) → caption
 (title) → meta line → context gauge**. `elapsedText` is **time-in-state**:
