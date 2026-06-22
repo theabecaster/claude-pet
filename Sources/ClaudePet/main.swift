@@ -121,10 +121,8 @@ struct Prefs: Codable {
     var theme: String = "claude"        // Palette id
     var soundOnAttention: Bool = true   // chime when a session needs you / fails
     var bounceOnAttention: Bool = true  // requestUserAttention (bounce) on the same
-    var showMeta: Bool = true           // model · context · branch line under the pet
-    var showElapsed: Bool = true        // time-in-state suffix in the status pill
+    var pinDetails: Bool = false        // keep the status pill open instead of reveal-on-hover
     var muted: Bool = false             // master mute for all attention alerts
-    var contextBudget: Int = 200_000    // gauge denominator (tokens); amber→red as it fills
     var renudge: Bool = true            // re-chime while a session keeps waiting on you
 
     static func load() -> Prefs {
@@ -184,6 +182,35 @@ func shortModel(_ id: String) -> String {
         if !nums.isEmpty { return fam + " " + nums.joined(separator: ".") }
     }
     return fam
+}
+
+// The context window for a session. Claude Code runs either the standard 200k window
+// or the 1M beta, depending on the model/session — and the transcript doesn't state
+// which. Infer it: once usage passes 200k it must be a 1M session; otherwise assume
+// 200k (the common case). Callers make this sticky per session so it can't flip back.
+func contextLimitFor(tokens: Int) -> Int { tokens > 200_000 ? 1_000_000 : 200_000 }
+
+// EXACT context usage, when available. Claude Code only hands the true context-window
+// size (200k vs the 1M beta) to its *statusline* command, not to hooks. Some statuslines
+// (e.g. GSD's) relay it to a bridge file at $TMPDIR/claude-ctx-<session>.json as
+// `used_pct` (= 100 − remaining_percentage, matching CC's own /context). If that file
+// exists and is fresh, we use it — automatically correct for 200k or 1M. Otherwise the
+// caller falls back to the token-count heuristic.
+func bridgeContextUsed(_ session: String) -> Double? {
+    guard !session.isEmpty, !session.contains("/"), !session.contains("..") else { return nil }
+    var dirs = [NSTemporaryDirectory()]
+    var buf = [CChar](repeating: 0, count: 1024)
+    if confstr(_CS_DARWIN_USER_TEMP_DIR, &buf, buf.count) > 0 { dirs.append(String(cString: buf)) }
+    dirs.append("/tmp")
+    for dir in dirs {
+        let p = (dir as NSString).appendingPathComponent("claude-ctx-\(session).json")
+        guard let data = FileManager.default.contents(atPath: p),
+              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+        if let ts = o["timestamp"] as? Double, Date().timeIntervalSince1970 - ts > 3600 { continue }  // stale
+        let used = (o["used_pct"] as? Double) ?? (o["used_pct"] as? Int).map(Double.init)
+        if let u = used { return max(0, min(1, u / 100)) }
+    }
+    return nil
 }
 
 // Compact a token count: 1234 -> "1.2k", 45000 -> "45k", 1200000 -> "1.2M".
@@ -523,12 +550,21 @@ final class PetView: NSView {
     var bubbleDot: NSColor?
     var oneShotFallback: String?
     var caption: String?
-    var detail: String?          // verb / reason folded into the pill ("editing", "rate limited"…)
-    var elapsedText: String?     // time-in-state, e.g. "12s" (shown when showElapsed)
-    var metaText: String?        // "opus 4.8 · 45k · main" line under the caption
-    var ctxFraction: Double?     // context used / budget → the gauge bar (nil hides it)
-    var showElapsed = true
+    var detail: String?          // verb / reason for the status pill ("editing main.swift", "rate limited"…)
+    var elapsedText: String?     // time-in-state, e.g. "12s"
+    var ctxProgress: Double?     // 0…1 context used; drawn as a progress fill on the pill's border
     var baseState = "idle"       // the true session state, so a one-shot poke returns to it
+
+    // Progressive disclosure: at rest the overlay is JUST the pet. Pointing at it — or
+    // pinning — fades in the name + status pill, which then linger a few seconds after
+    // the pointer leaves so they stay readable, before fading back to just the pet.
+    var hovering = false         // pinned || pointer over the pet
+    private var revealAmount = 0.0   // 0…1 eased; 1 = fully shown
+    private var lingerTicks = 0      // frames to hold the reveal up after hover ends
+    private let lingerHold = 90      // ~3s at 30fps
+    // True while the name/pill are (even partly) shown — the container grows to fit them
+    // so the at-rest overlay can stay tight to the pet.
+    var isRevealed: Bool { hovering || revealAmount > 0.01 }
 
     private var ticks = 0
     private var spriteAccum = 0.0
@@ -584,6 +620,15 @@ final class PetView: NSView {
     func advance() {
         ticks += 1
         idleTicks = (anim == "idle") ? idleTicks + 1 : 0
+        // Reveal: fade in while hovering, hold for `lingerHold` after the pointer
+        // leaves (so the panel stays usable), then fade out slowly.
+        if hovering { lingerTicks = lingerHold }
+        if hovering || lingerTicks > 0 {
+            if !hovering { lingerTicks -= 1 }
+            revealAmount = min(1, revealAmount + 0.16)
+        } else {
+            revealAmount = max(0, revealAmount - 0.05)
+        }
         if sprite != nil {
             spriteAccum += stateFPS() / 30.0
             while spriteAccum >= 1 {
@@ -663,13 +708,15 @@ final class PetView: NSView {
             if sleeping { drawZzz(near: dest) }
         }
 
-        // Text uses the BASE rect (no bob) so it stays stable: pet -> pill -> caption -> meta -> gauge.
+        // At rest the overlay is JUST the pet. On reveal (hover/pin), the status pill
+        // fades in above it (the session name lives in the picker, not here). The pill's
+        // border doubles as the context gauge: green→amber→red as the context fills.
+        guard revealAmount > 0.02 else { return }
+        let a = CGFloat(revealAmount)
         let textRect = NSRect(x: baseX, y: baseY, width: drawW, height: drawH)
-        var topY = textRect.maxY
-        if let label = pillText() { topY = drawBubble(label, dot: bubbleDot, above: textRect) }
-        if let cap = caption { topY = drawCaption(cap, atY: topY + 5) }
-        if let meta = metaText { topY = drawMeta(meta, atY: topY + 2) }
-        if let frac = ctxFraction { drawGauge(frac, atY: topY + 4) }
+        if let label = pillText() {
+            drawBubble(label, dot: bubbleDot, atY: textRect.maxY + 6, alpha: a, progress: ctxProgress)
+        }
     }
 
     // A few drifting "z"s above a dozing mascot.
@@ -686,108 +733,86 @@ final class PetView: NSView {
         }
     }
 
-    // A thin context-usage bar: green normally, amber as it fills, red near the limit
-    // (where Claude Code is likely to auto-compact). Centered under the meta line.
-    private func drawGauge(_ frac: Double, atY y: CGFloat) {
-        let w = min(bounds.width - 44, 150), h: CGFloat = 4
-        let x = (bounds.width - w) / 2
-        let yy = min(y, bounds.height - h - 2)
-        let track = NSBezierPath(roundedRect: NSRect(x: x, y: yy, width: w, height: h), xRadius: 2, yRadius: 2)
-        Theme.termFG.withAlphaComponent(0.15).setFill(); track.fill()
-        let f = max(0.02, min(1.0, frac))
-        let col: NSColor = frac >= 0.9 ? Theme.red
-            : (frac >= 0.75 ? NSColor(red: 0.92, green: 0.62, blue: 0.22, alpha: 1) : Theme.green)
-        let fill = NSBezierPath(roundedRect: NSRect(x: x, y: yy, width: w * CGFloat(f), height: h), xRadius: 2, yRadius: 2)
-        col.setFill(); fill.fill()
-    }
-
     // The status pill text: the activity/reason (detail) takes over the bare state
     // label when present ("editing" instead of "working"; the notification reason
     // instead of "needs you"), with the time-in-state appended when enabled.
     private func pillText() -> String? {
-        var base = detail ?? bubbleLabel
-        if base == nil { return nil }
-        let font = NSFont(name: "Menlo", size: 11) ?? NSFont.boldSystemFont(ofSize: 11)
-        base = truncated(base!, font: font, maxW: bounds.width - 44)   // leave room for dot + padding
-        if showElapsed, let e = elapsedText { return base! + " · " + e }
+        guard var base = detail ?? bubbleLabel else { return nil }
+        if let e = elapsedText { base += " · " + e }   // wrapped to 2 lines by drawBubble, not truncated
         return base
     }
 
-    // Dim project/session label above the pill. Long AI titles wrap to two lines.
-    // Returns the Y above the topmost caption line so the meta line can stack on it.
-    @discardableResult
-    private func drawCaption(_ text: String, atY y: CGFloat) -> CGFloat {
-        let font: NSFont = NSFont(name: "Menlo", size: 9) ?? NSFont.systemFont(ofSize: 9)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG.withAlphaComponent(0.7)]
-        let maxW = bounds.width - 6
-        let lines = wrapCaption(text, maxW: maxW, attrs: attrs)
-        let lineH = (font.ascender - font.descender) + 1
-        var top = y
-        for (i, line) in lines.enumerated() {
-            let s = line as NSString
-            let sz = s.size(withAttributes: attrs)
-            let x = min(max(2, (bounds.width - sz.width) / 2), bounds.width - sz.width - 2)
-            let ly = min(y + CGFloat(lines.count - 1 - i) * lineH, bounds.height - sz.height - 2)
-            s.draw(at: NSPoint(x: x, y: ly), withAttributes: attrs)
-            top = max(top, ly + sz.height)
+    // Word-wrap to at most `maxLines`; the final line is ellipsized if it still overflows.
+    private func wrap(_ text: String, font: NSFont, maxW: CGFloat, maxLines: Int) -> [String] {
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        func width(_ s: String) -> CGFloat { (s as NSString).size(withAttributes: attrs).width }
+        var lines: [String] = []
+        var cur = ""
+        for word in text.split(separator: " ").map(String.init) {
+            let cand = cur.isEmpty ? word : cur + " " + word
+            if width(cand) <= maxW || cur.isEmpty { cur = cand } else { lines.append(cur); cur = word }
         }
-        return top
+        if !cur.isEmpty { lines.append(cur) }
+        if lines.count <= maxLines { return lines }
+        var kept = Array(lines.prefix(maxLines - 1))
+        kept.append(truncated(lines[(maxLines - 1)...].joined(separator: " "), font: font, maxW: maxW))
+        return kept
     }
 
-    // The companion "intelligence" line: model · context · branch, parsed from the
-    // transcript. Dim and small; the coral accent ties it to the rest of the chrome.
-    @discardableResult
-    private func drawMeta(_ text: String, atY y: CGFloat) -> CGFloat {
-        let font: NSFont = NSFont(name: "Menlo", size: 8) ?? NSFont.systemFont(ofSize: 8)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.coral.withAlphaComponent(0.78)]
-        let s = truncated(text, font: font, maxW: bounds.width - 6) as NSString
-        let sz = s.size(withAttributes: attrs)
-        let x = min(max(2, (bounds.width - sz.width) / 2), bounds.width - sz.width - 2)
-        let ly = min(y, bounds.height - sz.height - 1)
-        s.draw(at: NSPoint(x: x, y: ly), withAttributes: attrs)
-        return ly + sz.height
-    }
-
-    private func wrapCaption(_ text: String, maxW: CGFloat, attrs: [NSAttributedString.Key: Any]) -> [String] {
-        func fits(_ s: String) -> Bool { (s as NSString).size(withAttributes: attrs).width <= maxW }
-        func ellipsize(_ s: String) -> String {
-            if fits(s) { return s }
-            var d = s
-            while d.count > 1, !fits(d + "…") { d = String(d.dropLast()) }
-            return d + "…"
-        }
-        if fits(text) { return [text] }
-        let words = text.split(separator: " ").map(String.init)
-        var first = "", rest = ""
-        for w in words {
-            let candidate = first.isEmpty ? w : first + " " + w
-            if rest.isEmpty && fits(candidate) { first = candidate }
-            else { rest = rest.isEmpty ? w : rest + " " + w }
-        }
-        if first.isEmpty { return [ellipsize(text)] }
-        return rest.isEmpty ? [first] : [first, ellipsize(rest)]
-    }
 
     @discardableResult
-    private func drawBubble(_ label: String, dot: NSColor?, above rect: NSRect) -> CGFloat {
+    private func drawBubble(_ label: String, dot: NSColor?, atY y: CGFloat, alpha: CGFloat = 1, progress: Double? = nil) -> CGFloat {
         let font: NSFont = NSFont(name: "Menlo", size: 11) ?? NSFont.boldSystemFont(ofSize: 11)
-        let text = label as NSString
-        let tAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG]
-        let tSize = text.size(withAttributes: tAttrs)
         let dotR: CGFloat = 4, padX: CGFloat = 8, padY: CGFloat = 4, gap: CGFloat = 6
-        let bw = padX * 2 + (dot != nil ? dotR * 2 + gap : 0) + tSize.width
-        let bh = padY * 2 + max(tSize.height, dotR * 2)
-        let bx = min(max(4, rect.midX - bw / 2), bounds.width - bw - 4)
-        let br = NSRect(x: bx, y: rect.maxY + 6, width: bw, height: bh)
-        let pill = NSBezierPath(roundedRect: br, xRadius: 6, yRadius: 6)
-        Theme.termBG.setFill(); pill.fill()
-        Theme.coral.withAlphaComponent(0.85).setStroke(); pill.lineWidth = 1; pill.stroke()
-        var cursor = br.minX + padX
-        if let d = dot {
-            d.setFill(); NSBezierPath(ovalIn: NSRect(x: cursor, y: br.midY - dotR, width: dotR * 2, height: dotR * 2)).fill()
-            cursor += dotR * 2 + gap
+        let dotW: CGFloat = dot != nil ? dotR * 2 + gap : 0
+        // Wrap to up to two lines so long reasons read fully instead of truncating hard.
+        let maxTextW = bounds.width - 8 - padX * 2 - dotW
+        let lines = wrap(label, font: font, maxW: maxTextW, maxLines: 2)
+        let tAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG.withAlphaComponent(alpha)]
+        let sizes = lines.map { ($0 as NSString).size(withAttributes: tAttrs) }
+        let textW = sizes.map { $0.width }.max() ?? 0
+        let lineH = font.ascender - font.descender + 2
+        let textH = lineH * CGFloat(lines.count)
+        let bw = padX * 2 + dotW + textW
+        let bh = padY * 2 + max(textH, dotR * 2)
+        let bx = min(max(4, bounds.midX - bw / 2), bounds.width - bw - 4)
+        let br = NSRect(x: bx, y: y, width: bw, height: bh)
+        let radius: CGFloat = 6
+        let pill = NSBezierPath(roundedRect: br, xRadius: radius, yRadius: radius)
+        Theme.termBG.withAlphaComponent(0.92 * alpha).setFill(); pill.fill()
+
+        if let p = progress {
+            // Border IS the context gauge: a dim full-perimeter track, then a fraction
+            // of the perimeter drawn over it (clockwise from the top) in green→amber→red.
+            let f = max(0, min(1, p))
+            let track = NSBezierPath(roundedRect: br, xRadius: radius, yRadius: radius)
+            track.lineWidth = 1.5
+            Theme.termFG.withAlphaComponent(0.20 * alpha).setStroke(); track.stroke()
+            if f > 0.001 {
+                let perim = 2 * ((br.width - 2 * radius) + (br.height - 2 * radius)) + 2 * .pi * radius
+                let prog = NSBezierPath(roundedRect: br, xRadius: radius, yRadius: radius)
+                prog.lineWidth = 1.6
+                prog.lineCapStyle = .round
+                prog.setLineDash([perim * CGFloat(f), perim], count: 2, phase: 0)
+                let col: NSColor = f >= 0.9 ? Theme.red
+                    : (f >= 0.75 ? NSColor(red: 0.92, green: 0.62, blue: 0.22, alpha: 1) : Theme.green)
+                col.withAlphaComponent(alpha).setStroke(); prog.stroke()
+            }
+        } else {
+            Theme.coral.withAlphaComponent(0.85 * alpha).setStroke(); pill.lineWidth = 1; pill.stroke()
         }
-        text.draw(at: NSPoint(x: cursor, y: br.midY - tSize.height / 2), withAttributes: tAttrs)
+
+        if let d = dot {
+            d.withAlphaComponent(alpha).setFill()
+            NSBezierPath(ovalIn: NSRect(x: br.minX + padX, y: br.midY - dotR, width: dotR * 2, height: dotR * 2)).fill()
+        }
+        let textX = br.minX + padX + dotW
+        var ly = br.maxY - padY - (sizes.first?.height ?? lineH)
+        for (i, line) in lines.enumerated() {
+            (line as NSString).draw(at: NSPoint(x: textX, y: ly), withAttributes: tAttrs)
+            ly -= lineH
+            _ = i
+        }
         return br.maxY
     }
 }
@@ -808,9 +833,14 @@ final class StackView: NSView {
     var onReorder: (([String]) -> Void)?
     var onCycle: ((Int) -> Void)?
     var onPetTapped: (() -> Void)?
+    var pinDetails = false                  // keep the details panel open regardless of hover
+    var petHovered = false                  // mouse currently over the pet region
 
-    let W: CGFloat = 232, PETH: CGFloat = 192
-    let rowH: CGFloat = 26, innerPad: CGFloat = 7, margin: CGFloat = 8, gap: CGFloat = 6
+    let W: CGFloat = 232
+    // The pet panel is short at rest (JUST the pet) and grows when the status pill
+    // reveals on hover, fitting up to a 2-line pill.
+    var PETH: CGFloat { primary.isRevealed ? 150 : 112 }
+    let rowH: CGFloat = 26, innerPad: CGFloat = 7, margin: CGFloat = 8, gap: CGFloat = 5
     private var downInWin = NSPoint.zero    // mouse-down point in view coords
     private var lastScreen = NSPoint.zero   // for window dragging (screen coords)
     private var moved: CGFloat = 0
@@ -819,9 +849,13 @@ final class StackView: NSView {
     private var dragCursorY: CGFloat = 0    // cursor Y so the lifted row follows
     private var windowDrag = false
     private var hoveredRow = -1
+    private var hoverRowSince = Date()       // when the current row hover began (for dwell reveal)
     private var scrollAccum: CGFloat = 0
 
-    var showList: Bool { items.count > 1 }
+    // The session picker is also part of the reveal: hidden at rest (just the pet),
+    // shown only while hovering/pinned. Names live in the picker, so the big pet shows
+    // no caption of its own.
+    var showList: Bool { items.count > 1 && primary.isRevealed }
     var isReordering: Bool { dragging }    // true mid-drag: sync() must not clobber `items`
 
     override init(frame f: NSRect) { super.init(frame: f); addSubview(primary) }
@@ -851,7 +885,7 @@ final class StackView: NSView {
         return (i >= 0 && i < items.count) ? i : nil
     }
 
-    private func drawRow(_ it: SessionItem, in row: NSRect, selected: Bool, hovered: Bool, lifted: Bool, font: NSFont) {
+    private func drawRow(_ it: SessionItem, in row: NSRect, selected: Bool, hovered: Bool, lifted: Bool, showDetail: Bool, font: NSFont) {
         let inner = row.insetBy(dx: 3, dy: 1)
         if lifted {                                            // the row being dragged: pops out
             Theme.termBG.setFill()
@@ -874,21 +908,22 @@ final class StackView: NSView {
         let dotR: CGFloat = 4
         accentFor(it.state).setFill()
         NSBezierPath(ovalIn: NSRect(x: row.minX + 20, y: row.midY - dotR, width: dotR * 2, height: dotR * 2)).fill()
-        // Right side: what the session is doing (its activity detail), or the bare
-        // status word when there's no detail. The dot already carries the state color,
-        // so the detail reads in a calmer dim tone and is width-capped to protect the name.
-        let hasDetail = (it.detail?.isEmpty == false)
-        let rightRaw = hasDetail ? it.detail! : shortStatus(it.state)
-        let rightCol = hasDetail ? Theme.termFG.withAlphaComponent(0.55) : accentFor(it.state)
-        let stStr = truncated(rightRaw, font: font, maxW: 116) as NSString
-        let stAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: rightCol]
-        let stSize = stStr.size(withAttributes: stAttrs)
-        let stX = row.maxX - 12 - stSize.width
-        stStr.draw(at: NSPoint(x: stX, y: row.midY - stSize.height / 2), withAttributes: stAttrs)
+        // By default a row shows ONLY the name (no second text to collide with it).
+        // The activity detail reveals on the right after you hover the row a moment;
+        // the name then truncates to leave it room, so the two never overlap.
         let nameX = row.minX + 32
+        var nameMaxW = row.maxX - 12 - nameX
+        if showDetail, let d = it.detail, !d.isEmpty {
+            let stStr = truncated(d, font: font, maxW: 120) as NSString
+            let stAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.termFG.withAlphaComponent(0.5)]
+            let stSize = stStr.size(withAttributes: stAttrs)
+            let stX = row.maxX - 12 - stSize.width
+            stStr.draw(at: NSPoint(x: stX, y: row.midY - stSize.height / 2), withAttributes: stAttrs)
+            nameMaxW = stX - nameX - 10
+        }
         let nmCol = selected ? Theme.termFG : Theme.termFG.withAlphaComponent(0.85)
         let nmAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: nmCol]
-        let nm = truncated(it.label, font: font, maxW: stX - nameX - 8) as NSString
+        let nm = truncated(it.label, font: font, maxW: max(20, nameMaxW)) as NSString
         nm.draw(at: NSPoint(x: nameX, y: row.midY - nm.size(withAttributes: nmAttrs).height / 2), withAttributes: nmAttrs)
     }
 
@@ -900,25 +935,44 @@ final class StackView: NSView {
         Theme.termBG.setFill(); bg.fill()
         Theme.coral.withAlphaComponent(0.7).setStroke(); bg.lineWidth = 1; bg.stroke()
 
+        // Reveal a row's activity detail only after the pointer rests on it a moment,
+        // so it doesn't flicker as you sweep across the list.
+        let dwell = Date().timeIntervalSince(hoverRowSince) > 0.45
         let font = NSFont(name: "Menlo", size: 10) ?? .systemFont(ofSize: 10)
         for (i, it) in items.enumerated() {
             if dragging && i == dragIndex { continue }          // leave a gap; drawn floating below
             let rowY = panel.maxY - innerPad - CGFloat(i + 1) * rowH
             let row = NSRect(x: panel.minX, y: rowY, width: panel.width, height: rowH)
-            drawRow(it, in: row, selected: it.id == selectedID, hovered: !dragging && i == hoveredRow, lifted: false, font: font)
+            let isHov = !dragging && i == hoveredRow
+            drawRow(it, in: row, selected: it.id == selectedID, hovered: isHov, lifted: false, showDetail: isHov && dwell, font: font)
         }
         if dragging, let di = dragIndex {                       // the lifted row follows the cursor
             let cy = min(max(dragCursorY, panel.minY + rowH / 2), panel.maxY - rowH / 2)
             let row = NSRect(x: panel.minX, y: cy - rowH / 2, width: panel.width, height: rowH)
-            drawRow(items[di], in: row, selected: items[di].id == selectedID, hovered: false, lifted: true, font: font)
+            drawRow(items[di], in: row, selected: items[di].id == selectedID, hovered: false, lifted: true, showDetail: false, font: font)
         }
     }
 
+    override func mouseEntered(with e: NSEvent) { updatePetHover(true) }
     override func mouseMoved(with e: NSEvent) {
-        let i = rowIndex(at: convert(e.locationInWindow, from: nil)) ?? -1
-        if i != hoveredRow { hoveredRow = i; needsDisplay = true }
+        let p = convert(e.locationInWindow, from: nil)
+        let i = rowIndex(at: p) ?? -1
+        if i != hoveredRow { hoveredRow = i; hoverRowSince = Date(); needsDisplay = true }
+        updatePetHover(true)
     }
-    override func mouseExited(with e: NSEvent) { if hoveredRow != -1 { hoveredRow = -1; needsDisplay = true } }
+    override func mouseExited(with e: NSEvent) {
+        if hoveredRow != -1 { hoveredRow = -1; needsDisplay = true }
+        updatePetHover(false)
+    }
+
+    // Pointing anywhere at the widget (or pinning) reveals the pill + the session
+    // picker; leaving hides them again (after the pet's linger). Using the whole widget
+    // — not just the pet — keeps the revealed picker from collapsing under the pointer.
+    func updatePetHover(_ over: Bool) {
+        petHovered = over
+        let target = pinDetails || petHovered
+        if primary.hovering != target { primary.hovering = target }
+    }
 
     override func mouseDown(with e: NSEvent) {
         downInWin = convert(e.locationInWindow, from: nil)
@@ -975,6 +1029,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var prefs = Prefs()
     var prevStates: [String: String] = [:]   // last-seen state per session (for transition alerts)
     var lastNudge: [String: Date] = [:]       // last re-nudge time per session
+    var ctxLimit: [String: Int] = [:]         // inferred context window per session (sticky)
     var stateSince: [String: Date] = [:]      // when each session entered its current state
     var didInitialSync = false                // suppress alerts for sessions present at launch
 
@@ -1037,25 +1092,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             it.state = on ? .on : .off
             return it
         }
+        menu.addItem(toggle("Keep Details Open", prefs.pinDetails, #selector(togglePin)))
+        menu.addItem(.separator())
         menu.addItem(toggle("Sound on Attention", prefs.soundOnAttention && !prefs.muted, #selector(toggleSound)))
         menu.addItem(toggle("Bounce on Attention", prefs.bounceOnAttention && !prefs.muted, #selector(toggleBounce)))
         menu.addItem(toggle("Re-nudge While Waiting", prefs.renudge, #selector(toggleRenudge)))
         menu.addItem(toggle("Mute All Alerts", prefs.muted, #selector(toggleMuted)))
-        menu.addItem(.separator())
-        menu.addItem(toggle("Show Session Info", prefs.showMeta, #selector(toggleMeta)))
-        menu.addItem(toggle("Show Time in State", prefs.showElapsed, #selector(toggleElapsed)))
-
-        // Context-gauge budget submenu (the gauge's denominator)
-        let budgetItem = NSMenuItem(title: "Context Budget", action: nil, keyEquivalent: "")
-        let budgetMenu = NSMenu()
-        for (label, value) in [("200k (default)", 200_000), ("500k", 500_000), ("1M", 1_000_000)] {
-            let bi = NSMenuItem(title: label, action: #selector(pickBudget(_:)), keyEquivalent: "")
-            bi.representedObject = value
-            bi.state = (prefs.contextBudget == value) ? .on : .off
-            budgetMenu.addItem(bi)
-        }
-        budgetItem.submenu = budgetMenu
-        menu.addItem(budgetItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Get Custom Pets (codex-pets.net)…", action: #selector(browseCustomPets), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Load Pet… (Codex .webp or folder)", action: #selector(loadSprite), keyEquivalent: "l"))
@@ -1086,12 +1128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func toggleBounce()  { prefs.bounceOnAttention.toggle(); commitPrefs() }
     @objc func toggleMuted()   { prefs.muted.toggle(); commitPrefs() }
     @objc func toggleRenudge() { prefs.renudge.toggle(); commitPrefs() }
-    @objc func toggleMeta()    { prefs.showMeta.toggle(); commitPrefs(); sync() }
-    @objc func toggleElapsed() { prefs.showElapsed.toggle(); commitPrefs(); sync() }
-    @objc func pickBudget(_ sender: NSMenuItem) {
-        guard let v = sender.representedObject as? Int else { return }
-        prefs.contextBudget = v; commitPrefs(); sync()
-    }
+    @objc func togglePin()     { prefs.pinDetails.toggle(); commitPrefs(); sync() }
 
     // Wall-clock age of a session, from when its state file was first written.
     private func sessionAge(_ id: String) -> String? {
@@ -1229,9 +1266,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sync()
 
         Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            self?.stack.primary.advance()
+            guard let self = self else { return }
+            self.stack.primary.advance()
+            self.resizeIfNeeded()          // grow/shrink the panel as details reveal/collapse
         }
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.sync() }
+    }
+
+    // Keep the window matched to the stack's desired height (which changes as the pet's
+    // details reveal). Bottom-anchored so the pet stays put and the panel grows upward.
+    private func resizeIfNeeded() {
+        guard window != nil, !order.isEmpty, !hidden else { return }
+        let h = stack.desiredHeight()
+        if abs(window.frame.height - h) > 0.5 {
+            var f = window.frame
+            f.origin.y = f.minY; f.size = NSSize(width: stack.W, height: h)
+            window.setFrame(f, display: true)
+            stack.frame = NSRect(origin: .zero, size: f.size)
+            stack.layoutContents()
+        }
     }
 
     private var lastSavedLayout = ""
@@ -1268,17 +1321,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func folderName(_ st: PetState) -> String? { st.cwd.map { URL(fileURLWithPath: $0).lastPathComponent } }
     private func label(_ id: String, _ st: PetState) -> String? { sessionMeta(id, st).title ?? folderName(st) }
 
-    // The dim "model · context · branch" line for the selected pet, from its transcript.
-    private func metaLine(_ id: String, _ st: PetState) -> String? {
-        let m = sessionMeta(id, st)
-        var parts: [String] = []
-        if let model = m.model { parts.append(shortModel(model)) }
-        if let tok = m.ctxTokens { parts.append(compactTokens(tok) + " ctx") }
-        if let b = m.branch { parts.append(b) }
-        if let badge = modeBadge(st.mode) { parts.append(badge) }   // plan / auto-edits / bypass
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
-
     private func isAttentionState(_ s: String) -> Bool { s == "waiting" || s == "failed" || s == "error" }
 
     // A single session crossing into "needs you" / "failed": optionally chime and
@@ -1312,6 +1354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for id in stateSince.keys where live[id] == nil { stateSince[id] = nil }
         for id in prevStates.keys where live[id] == nil { prevStates[id] = nil }
         for id in lastNudge.keys where live[id] == nil { lastNudge[id] = nil }
+        for id in ctxLimit.keys where live[id] == nil { ctxLimit[id] = nil }
 
         // Track time-in-state and fire attention alerts on transitions INTO an
         // attention state (needs you / failed), for any session — not just the
@@ -1356,16 +1399,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             stack.items = order.compactMap { id in live[id].map { SessionItem(id: id, state: $0.st.state, label: label(id, $0.st) ?? String(id.prefix(6)), detail: $0.st.detail) } }
         }
         stack.selectedID = selectedID
-        stack.primary.caption = label(selectedID!, sel.st)     // shown for single AND multi (wraps to 2 lines)
+        stack.primary.caption = label(selectedID!, sel.st)     // the session name, one line under the pet
         stack.primary.baseState = sel.st.state                 // so a pet-tap reaction settles back here
         stack.primary.detail = sel.st.detail                   // what it's doing / why it needs you
-        stack.primary.showElapsed = prefs.showElapsed
-        stack.primary.elapsedText = prefs.showElapsed
-            ? stateSince[selectedID!].map { compactElapsed(now.timeIntervalSince($0)) } : nil
-        stack.primary.metaText = prefs.showMeta ? metaLine(selectedID!, sel.st) : nil
-        if prefs.showMeta, prefs.contextBudget > 0, let tok = sessionMeta(selectedID!, sel.st).ctxTokens {
-            stack.primary.ctxFraction = Double(tok) / Double(prefs.contextBudget)
-        } else { stack.primary.ctxFraction = nil }
+        stack.primary.elapsedText = stateSince[selectedID!].map { compactElapsed(now.timeIntervalSince($0)) }
+        // Context gauge on the pill border. Prefer the EXACT usage from the statusline
+        // bridge file (correct for 200k or 1M); otherwise infer the window from usage
+        // (sticky once it passes 200k → 1M).
+        if let exact = bridgeContextUsed(selectedID!) {
+            stack.primary.ctxProgress = exact
+        } else if let tok = sessionMeta(selectedID!, sel.st).ctxTokens {
+            let limit = max(ctxLimit[selectedID!] ?? 0, contextLimitFor(tokens: tok))
+            ctxLimit[selectedID!] = limit
+            stack.primary.ctxProgress = Double(tok) / Double(limit)
+        } else { stack.primary.ctxProgress = nil }
+        stack.pinDetails = prefs.pinDetails
+        stack.primary.hovering = prefs.pinDetails || stack.petHovered
         let key = selectedID! + "|" + sel.st.state
         if appliedKey != key { appliedKey = key; stack.primary.setState(sel.st.state) }
         updateMenuBarIcon(sel.st.state)
@@ -1691,6 +1740,7 @@ func selfTest() -> Bool {
                  SessionItem(id: "b", state: "waiting", label: "bravo"),
                  SessionItem(id: "c", state: "idle", label: "charlie")]
     sv.items = items; sv.selectedID = "a"
+    sv.primary.hovering = true                  // reveal the picker so rows are interactive
     let h = sv.desiredHeight()
     sv.frame = NSRect(x: 0, y: 0, width: sv.W, height: h)
     let win = NSWindow(contentRect: sv.frame, styleMask: .borderless, backing: .buffered, defer: false)
@@ -1773,10 +1823,11 @@ func selfTest() -> Bool {
     check("palette lookup falls back", Palette.byID("nope").id == "claude" && Palette.byID("midnight").id == "midnight")
 
     // 7) Prefs round-trip (in-memory; never touches the user's prefs.json).
-    var p = Prefs(); p.theme = "grove"; p.muted = true; p.showMeta = false; p.contextBudget = 500_000; p.renudge = false
+    var p = Prefs(); p.theme = "grove"; p.muted = true; p.pinDetails = true; p.renudge = false
     if let d = try? JSONEncoder().encode(p), let r = try? JSONDecoder().decode(Prefs.self, from: d) {
-        check("prefs round-trip", r.theme == "grove" && r.muted && !r.showMeta && r.contextBudget == 500_000 && !r.renudge)
+        check("prefs round-trip", r.theme == "grove" && r.muted && r.pinDetails && !r.renudge)
     } else { check("prefs round-trip", false) }
+    check("contextLimit infers window", contextLimitFor(tokens: 50_000) == 200_000 && contextLimitFor(tokens: 260_000) == 1_000_000)
 
     // 8) Cost / totals helpers.
     check("compactUSD formats", compactUSD(0.004) == "<$0.01" && compactUSD(0.42) == "$0.42" && compactUSD(13.0) == "$13")
@@ -1809,8 +1860,8 @@ func renderStack(to path: String) {
     sv.primary.setState("waiting")
     sv.primary.detail = "permission: run Bash"     // why it needs you (from the Notification hook)
     sv.primary.elapsedText = "2m"                   // time-in-state
-    sv.primary.metaText = "opus 4.8 · 43k ctx · main"  // model · context · branch (from transcript)
-    sv.primary.ctxFraction = 0.42                   // context gauge bar
+    sv.primary.ctxProgress = 0.42                   // context gauge on the pill border
+    sv.primary.hovering = true                  // show the pill in the static preview
     sv.selectedID = "sel"
     sv.items = [
         SessionItem(id: "sel", state: "waiting", label: "Validate race prediction", detail: "run Bash"),
@@ -1844,9 +1895,9 @@ func renderState(_ state: String, to path: String) {
     if let t = env["CLAUDEPET_THEME"] { Theme.current = Palette.byID(t) }   // QA preview only
     v.caption = env["CLAUDEPET_CAPTION"]   // QA preview only
     v.detail  = env["CLAUDEPET_DETAIL"]
-    v.metaText = env["CLAUDEPET_META"]
     v.elapsedText = env["CLAUDEPET_ELAPSED"]
-    v.ctxFraction = env["CLAUDEPET_CTXFRAC"].flatMap { Double($0) }
+    v.ctxProgress = env["CLAUDEPET_CTXFRAC"].flatMap { Double($0) }
+    if env["CLAUDEPET_DETAIL"] != nil || env["CLAUDEPET_REVEAL"] != nil { v.hovering = true }
     v.setState(state)
     let frames = env["CLAUDEPET_ADVANCE"].flatMap { Int($0) } ?? 8   // QA: crank to reach the sleep state
     for _ in 0..<frames { v.advance() }                      // settle into a representative frame
