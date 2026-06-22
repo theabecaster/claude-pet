@@ -625,9 +625,9 @@ final class PetView: NSView {
         if hovering { lingerTicks = lingerHold }
         if hovering || lingerTicks > 0 {
             if !hovering { lingerTicks -= 1 }
-            revealAmount = min(1, revealAmount + 0.16)
+            revealAmount = min(1, revealAmount + 0.34)   // snappy fade-in (~3 frames)
         } else {
-            revealAmount = max(0, revealAmount - 0.05)
+            revealAmount = max(0, revealAmount - 0.22)   // quick fade-out
         }
         if sprite != nil {
             spriteAccum += stateFPS() / 30.0
@@ -879,6 +879,7 @@ final class StackView: NSView {
     var onReorder: (([String]) -> Void)?
     var onCycle: ((Int) -> Void)?
     var onPetTapped: (() -> Void)?
+    var onWindowMoved: (() -> Void)?        // user dragged the widget -> re-anchor the pet
     var pinDetails = false                  // keep the details panel open regardless of hover
     var petHovered = false                  // mouse currently over the pet region
     var listExpanded = false                // picker: collapsed (active session only) vs all sessions
@@ -1117,6 +1118,7 @@ final class StackView: NSView {
             let now = NSEvent.mouseLocation
             if let win = window { var o = win.frame.origin; o.x += now.x - lastScreen.x; o.y += now.y - lastScreen.y; win.setFrameOrigin(o) }
             lastScreen = now
+            onWindowMoved?()                    // re-anchor the pet to the dragged position
         } else if listExpanded, let di = dragIndex, moved > 3 {   // reorder this row live
             dragging = true; dragCursorY = p.y
             if let t = rowIndex(at: p, clamp: true), t != di {
@@ -1389,6 +1391,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stack.onReorder = { [weak self] ids in self?.order = ids; self?.sync() }
         stack.onCycle = { [weak self] d in self?.cycleSelection(d) }
         stack.onPetTapped = { [weak self] in self?.stack.primary.poke() }
+        stack.onWindowMoved = { [weak self] in
+            guard let self = self, self.window != nil else { return }
+            self.petAnchorY = self.window.frame.minY + self.stack.margin + self.stack.listOffset()
+        }
 
         window = NSWindow(contentRect: stack.frame, styleMask: .borderless, backing: .buffered, defer: false)
         window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = false
@@ -1398,6 +1404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let vf = NSScreen.main?.visibleFrame {
             window.setFrameOrigin(NSPoint(x: vf.maxX - stack.W - 16, y: vf.minY + 28))
         }
+        petAnchorY = window.frame.minY + stack.margin       // pin the pet here
         stack.layoutContents()
         loadLayout()
         sync()
@@ -1415,22 +1422,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // picker (below) reveal. The pet stays visually put: the bubble grows upward from the
     // current top, while the picker grows downward — we shift the window's bottom by the
     // change in the picker's height so the pet doesn't move.
-    private var lastListOffset: CGFloat = 0
+    // Absolute pet anchor (screen Y of the pet panel's bottom). Keeping it fixed and
+    // deriving the window origin from it makes applyWindowFrame() idempotent — the bubble
+    // grows up and the picker grows down, but the PET never moves (no drift on repeated
+    // calls, unlike an incremental delta). Updated only when the user drags the widget.
+    var petAnchorY: CGFloat? = nil
     private func applyWindowFrame() {
         guard window != nil else { return }
         let listOffset = stack.listOffset()
         let h = stack.desiredHeight()
+        let anchor = petAnchorY ?? (window.frame.minY + stack.margin)
+        petAnchorY = anchor
         var f = window.frame
-        f.origin.y = f.minY - (listOffset - lastListOffset)   // picker reveals downward; pet stays
+        f.origin.y = anchor - stack.margin - listOffset      // pet pinned; picker extends downward
         f.size = NSSize(width: stack.W, height: h)
         window.setFrame(f, display: true)
         stack.frame = NSRect(origin: .zero, size: f.size)
         stack.layoutContents()
-        lastListOffset = listOffset
     }
     private func resizeIfNeeded() {
         guard window != nil, !order.isEmpty, !hidden else { return }
-        if abs(window.frame.height - stack.desiredHeight()) > 0.5 || stack.listOffset() != lastListOffset {
+        let desiredY = (petAnchorY ?? (window.frame.minY + stack.margin)) - stack.margin - stack.listOffset()
+        if abs(window.frame.height - stack.desiredHeight()) > 0.5 || abs(window.frame.minY - desiredY) > 0.5 {
             applyWindowFrame()
         }
     }
