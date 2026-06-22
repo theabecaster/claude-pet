@@ -910,10 +910,25 @@ final class StackView: NSView {
     private func visibleItems() -> [SessionItem] { listExpanded ? items : (selectedItem.map { [$0] } ?? []) }
     var isReordering: Bool { dragging }    // true mid-drag: sync() must not clobber `items`
 
+    // Eased 0…1 expand progress (0 = collapsed to the active row, 1 = all rows). The
+    // VISUAL panel height interpolates on this so the box grows/shrinks smoothly and the
+    // two layouts cross-fade; hit-testing still uses the logical `rowCount` (final state).
+    private var expandAmount: CGFloat = 0
+    // Continuous row count for the panel height: 1 row, easing up to all rows.
+    private var visibleRows: CGFloat { 1 + CGFloat(max(0, items.count - 1)) * expandAmount }
+    // Drive the expand/collapse ease one frame; returns true while still animating.
+    @discardableResult func advanceExpand() -> Bool {
+        let target: CGFloat = (listExpanded && expandable) ? 1 : 0
+        if abs(expandAmount - target) < 0.001 { expandAmount = target; return false }
+        expandAmount += (target - expandAmount) * 0.3   // exponential ease toward target
+        needsDisplay = true
+        return true
+    }
+
     override init(frame f: NSRect) { super.init(frame: f); addSubview(primary) }
     required init?(coder: NSCoder) { fatalError() }
 
-    func listPanelH() -> CGFloat { showList ? CGFloat(rowCount) * rowH + innerPad * 2 : 0 }
+    func listPanelH() -> CGFloat { showList ? visibleRows * rowH + innerPad * 2 : 0 }
     func desiredHeight() -> CGFloat { margin * 2 + PETH + (showList ? gap + listPanelH() : 0) }
     // Session picker sits BELOW the pet (bubble above, pet centred, picker beneath) for a
     // balanced stack; the pet stays put while the picker reveals downward (see applyWindowFrame).
@@ -1010,15 +1025,21 @@ final class StackView: NSView {
 
         let dwell = Date().timeIntervalSince(hoverRowSince) > 0.45
         let font = NSFont(name: "Menlo", size: 10) ?? .systemFont(ofSize: 10)
+        let t = expandAmount                       // 0 = collapsed, 1 = expanded, eased
+        let cg = NSGraphicsContext.current!.cgContext
 
-        if !listExpanded {
-            // Collapsed: just the active session, with an expand affordance (chevron +
-            // count) on the right when there's more than one session.
-            guard let it = selectedItem else { return }
+        // Clip to the (animated) panel so rows mask in/out as the box grows/shrinks.
+        NSGraphicsContext.current?.saveGraphicsState()
+        bg.addClip()
+
+        // Collapsed layer — just the active session + an expand affordance (count +
+        // chevron). Fades out as the box expands.
+        if t < 0.999, let it = selectedItem {
+            cg.saveGState(); cg.setAlpha(1 - t)
             let rowY = panel.maxY - innerPad - rowH
             let row = NSRect(x: panel.minX, y: rowY, width: panel.width, height: rowH)
             let inset: CGFloat = expandable ? 30 : 0
-            drawRow(it, in: row, selected: true, hovered: hoveredRow == 0, lifted: false,
+            drawRow(it, in: row, selected: true, hovered: hoveredRow == 0 && !listExpanded, lifted: false,
                     showDetail: false, draggable: false, rightInset: inset, font: font)
             if expandable {
                 let n = "\(items.count)" as NSString
@@ -1027,28 +1048,35 @@ final class StackView: NSView {
                 n.draw(at: NSPoint(x: row.maxX - 26 - ns.width, y: row.midY - ns.height / 2), withAttributes: nAttrs)
                 drawChevron(down: true, cx: row.maxX - 15, cy: row.midY, w: 8, color: Theme.coral.withAlphaComponent(0.9))
             }
-            return
+            cg.restoreGState()
         }
 
-        // Expanded: all sessions (full select / scroll / drag), with a collapse chevron.
-        for (i, it) in items.enumerated() {
-            if dragging && i == dragIndex { continue }          // leave a gap; drawn floating below
-            let rowY = panel.maxY - innerPad - CGFloat(i + 1) * rowH
-            let row = NSRect(x: panel.minX, y: rowY, width: panel.width, height: rowH)
-            let isHov = !dragging && i == hoveredRow
-            let inset: CGFloat = i == 0 ? 22 : 0
-            drawRow(it, in: row, selected: it.id == selectedID, hovered: isHov, lifted: false,
-                    showDetail: isHov && dwell, draggable: true, rightInset: inset, font: font)
+        // Expanded layer — all sessions (full select / scroll / drag) + a collapse
+        // chevron. Fades in as the box expands; the rows beyond the first reveal in the
+        // growing space below.
+        if t > 0.001 {
+            cg.saveGState(); cg.setAlpha(t)
+            for (i, it) in items.enumerated() {
+                if dragging && i == dragIndex { continue }      // leave a gap; drawn floating below
+                let rowY = panel.maxY - innerPad - CGFloat(i + 1) * rowH
+                let row = NSRect(x: panel.minX, y: rowY, width: panel.width, height: rowH)
+                let isHov = !dragging && i == hoveredRow && listExpanded
+                let inset: CGFloat = i == 0 ? 22 : 0
+                drawRow(it, in: row, selected: it.id == selectedID, hovered: isHov, lifted: false,
+                        showDetail: isHov && dwell, draggable: true, rightInset: inset, font: font)
+            }
+            drawChevron(down: false, cx: panel.maxX - 15, cy: panel.maxY - innerPad - rowH / 2, w: 8,
+                        color: Theme.coral.withAlphaComponent(0.9))
+            if dragging, let di = dragIndex {                   // the lifted row follows the cursor
+                let cy = min(max(dragCursorY, panel.minY + rowH / 2), panel.maxY - rowH / 2)
+                let row = NSRect(x: panel.minX, y: cy - rowH / 2, width: panel.width, height: rowH)
+                drawRow(items[di], in: row, selected: items[di].id == selectedID, hovered: false, lifted: true,
+                        showDetail: false, draggable: true, rightInset: 0, font: font)
+            }
+            cg.restoreGState()
         }
-        // Collapse chevron on the top row.
-        drawChevron(down: false, cx: panel.maxX - 15, cy: panel.maxY - innerPad - rowH / 2, w: 8,
-                    color: Theme.coral.withAlphaComponent(0.9))
-        if dragging, let di = dragIndex {                       // the lifted row follows the cursor
-            let cy = min(max(dragCursorY, panel.minY + rowH / 2), panel.maxY - rowH / 2)
-            let row = NSRect(x: panel.minX, y: cy - rowH / 2, width: panel.width, height: rowH)
-            drawRow(items[di], in: row, selected: items[di].id == selectedID, hovered: false, lifted: true,
-                    showDetail: false, draggable: true, rightInset: 0, font: font)
-        }
+
+        NSGraphicsContext.current?.restoreGraphicsState()
     }
 
     override func mouseEntered(with e: NSEvent) { updatePetHover(true) }
@@ -1377,7 +1405,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             self.stack.primary.advance()
-            if !self.stack.primary.isRevealed { self.stack.listExpanded = false }   // next reveal starts collapsed
+            self.stack.advanceExpand()     // ease the picker's grow/shrink; persists across hide
             self.resizeIfNeeded()          // grow/shrink the panel as details reveal/collapse
         }
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.sync() }
@@ -1968,6 +1996,7 @@ func selfTest() -> Bool {
     sv.items = items; sv.selectedID = "a"
     sv.primary.hovering = true                  // reveal the picker so rows are interactive
     sv.listExpanded = true                      // expand so individual rows are clickable/draggable
+    for _ in 0..<60 { sv.advanceExpand() }      // settle the grow ease so all rows are laid out
     let h = sv.desiredHeight()
     sv.frame = NSRect(x: 0, y: 0, width: sv.W, height: h)
     let win = NSWindow(contentRect: sv.frame, styleMask: .borderless, backing: .buffered, defer: false)

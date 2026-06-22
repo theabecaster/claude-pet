@@ -33,130 +33,70 @@ straight in** — `spritesheet.webp` and all.
 
 Every Codex state is wired to a real Claude Code hook:
 
-| Codex state     | Claude Code hook        | Meaning                        | Pill        |
-|-----------------|-------------------------|--------------------------------|-------------|
-| `waving`        | `SessionStart`          | session begins (→ idle)        | `● hello`   |
-| `running-right` | `UserPromptSubmit`      | new turn starts                | `● working` |
-| `running`       | `PreToolUse`            | actively working               | `● working` |
-| `running-left`  | `PostToolUse`           | step finished                  | `● working` |
-| `waiting`       | `Notification` / `PermissionRequest` | needs your input  | `● needs you` |
-| `running`       | `PreCompact`            | context being compacted        | `● compacting context` |
-| `jumping`       | `Stop`                  | turn done (→ review)           | `● done!`   |
-| `review`        | (after `Stop`)          | ready for your next prompt     | `● ready`   |
-| `failed`        | `StopFailure`           | the turn errored               | `● error`   |
-| `idle`          | (after `waving`)        | at rest                        | —           |
+| Codex state     | Claude Code hook        | Meaning                        | Bubble says (on hover) |
+|-----------------|-------------------------|--------------------------------|------------------------|
+| `waving`        | `SessionStart`          | session begins (→ idle)        | `hey there`            |
+| `running-right` | `UserPromptSubmit`      | new turn starts                | `working…`             |
+| `running`       | `PreToolUse`            | actively working               | `editing main.swift`   |
+| `running-left`  | `PostToolUse`           | step finished                  | `editing main.swift`   |
+| `waiting`       | `Notification` / `PermissionRequest` | needs your input  | `answer Claude`        |
+| `running`       | `PreCompact`            | context being compacted        | `compacting context`   |
+| `jumping`       | `Stop`                  | turn done (→ review)           | `all done — your turn` |
+| `review`        | (after `Stop`)          | ready for your next prompt     | `all done — your turn` |
+| `failed`        | `StopFailure`           | the turn errored               | `stopped — rate limited` |
+| `idle`          | (after `waving`)        | at rest                        | —                      |
 
 Each hook writes `~/.claude-pet/sessions/<session_id>.json`; the overlay watches
 the folder and animates. `waving` and `jumping` are one-shots that settle into
-`idle` and `review`. No polling of Claude, no network. (The `working` pill gets
+`idle` and `review`. No polling of Claude, no network. (The bubble only shows on
+hover — see [below](#calm-at-rest-details-on-hover).)
 more specific in practice — see [below](#tells-you-whats-actually-happening).)
 
-## Calm by design
+## Calm at rest, details on hover
 
-The animation follows an **attention budget**: when Claude is *working*, the pet
-stays still and just looks busy (a slow typing cursor) so it never distracts you.
-When it **needs you** it gets your attention — a gentle bob and a pulsing halo —
-then settles down again once handled. `ready` gives a soft positive nudge,
-`error` a small shake. Calm while you work; loud only when it matters.
+At rest the overlay is **just the pet** — no labels, no panels, so it never distracts
+you. **Hover it** and a **thought bubble** drifts up with what's going on (and the
+session list appears below); move away and it lingers a few seconds, then fades back to
+just the pet.
 
-These code-drawn effects (bob, shake, halo) belong to the **built-in mascot**. A
-**custom sprite** renders flat and animates purely from its own frames, so it keeps
-exactly the look and motion its author designed in every state.
+The bubble talks in plain pet-voice: `editing main.swift` / `running npm` while working,
+**`answer Claude`** when it needs you, `all done — your turn` when it finishes,
+`stopped — rate limited` on an error — plus a `· 12s` time-in-state. Its **border is a
+context gauge** that fills **green → amber → red** as the session's context window fills,
+a heads-up before Claude auto-compacts. The gauge is exact when Claude Pet supplies your
+status line (it installs one only if you don't already have your own); otherwise it
+estimates from token counts.
 
-## Tells you what's actually happening
-
-The pet doesn't just show *that* Claude is busy — it shows **what it's doing** and
-**why it stopped**, pulled straight from the data Claude Code hands its hooks and
-writes to the transcript:
-
-- **The status pill names the activity — and its target.** Instead of a generic
-  "working", it says `editing main.swift`, `reading config.json`, `running npm`,
-  `searching "TODO"`, `browsing example.com`, `delegating` — the verb from the tool
-  in use plus the file / command / query it's working on. When it **needs you**, the
-  pill shows the actual reason ("permission: run Bash"); when it **errors**, the real
-  cause ("rate limited", "overloaded", "billing issue"); and during a context
-  compaction it says `compacting context`.
-- **Time-in-state.** A compact `· 12s` / `· 3m` tells you how long it's been
-  working on this step or waiting for you.
-- **A live session readout.** Under the name: the **model** (`opus 4.8`), the
-  **context size** so far (`43k ctx`), the **git branch** (`main`), and the
-  **permission mode** when it's not the default (`plan`, `auto-edits`, `bypass`).
-- **A context gauge.** A thin bar tracks context use against a budget (200k by
-  default; **✳ → Context Budget** for 500k / 1M). It runs green, turns **amber**
-  past 75%, and **red** near the limit — a heads-up before Claude auto-compacts.
-
-All read cheaply from the tail of the session transcript and the hook payloads.
-
-The gauge is **exact** when Claude Pet supplies your status line. Claude Code only
-hands the true context window (and whether it's the 200k or 1M beta) to a *status
-line* command, so on first launch the pet installs a tiny one **only if you don't
-already have one** — it never replaces your own. With it, the gauge shows the real
-percentage (matching `/context`); without it, the pet falls back to a token-count
-estimate. `ClaudePet --status` shows which is active.
-
-## Get a nudge when it needs you
-
-When a session crosses into **needs you** or **errors**, Claude Pet can **chime**
-and **bounce** to get your attention — even if the overlay is behind other windows.
-Both are independent toggles in the **✳ menu** (with a master **Mute All Alerts**),
-and they only fire on the *transition*, so a session that's already waiting when you
-launch won't spam you. If you miss it, **Re-nudge While Waiting** gently re-chimes
-every so often until you get to it.
+When a session **needs you** or **errors**, the pet can chime (and re-nudge if you miss
+it) — all toggleable in the **✳ menu**, with a master mute.
 
 ## Make it yours
 
-- **Themes.** **✳ → Theme** switches the whole widget between **Claude** (the coral
-  default), **Midnight**, **Grove**, and **Mono** — pill, list, pet, and menu-bar
-  icon all recolor instantly. Your pick is remembered.
-- **Pet the pet.** Tap the big pet and it does a happy little hop, then settles
-  back into whatever it was doing. Purely for joy.
-- **It dozes off.** Leave a session idle a while and the built-in mascot falls
-  asleep — closed eyes and a drifting `z` — then wakes the moment work resumes.
-- **Global show/hide.** Press **⌃⌥⌘P** anywhere to toggle the overlay, no need to
-  reach for the menu.
+- **Themes** — **✳ → Theme**: Claude, Midnight, Grove, Mono. Recolors everything.
+- **Pet the pet** — tap it for a happy little hop.
+- **It dozes off** — the built-in mascot falls asleep when idle, wakes when work resumes.
+- **Global show/hide** — **⌃⌥⌘P** from anywhere.
 
-Every preference (theme, alerts, info toggles, context budget) is saved to
-`~/.claude-pet/prefs.json` and restored on launch.
+## Menu bar & terminal
 
-## Lives in your menu bar too
-
-The menu-bar icon is a **tiny version of your pet**, colored by the selected
-session's state — coral at rest, green while working/ready, red when it needs you
-or errors. It reads clearly in both light and dark menu bars, so even with the
-overlay hidden (**✳ → Show / Hide**) you can still glance up and see what Claude
-is doing.
-
-Open the **✳ menu** and the top is a **live Sessions list** — every session with
-its state, what it's currently doing, and how long it's been running. Click one to
-make it the big pet (and pop the overlay back if it was hidden). Prefer the
-terminal? `ClaudePet --status` prints a fuller report — per session it adds
-**turns, token totals, an estimated cost, and duration**.
+The menu-bar icon is a tiny, state-colored version of your pet, so you can glance up even
+with the overlay hidden (**✳ → Show / Hide**). The **✳ menu** also lists your live
+sessions (click to switch). In a terminal, `ClaudePet --status` prints a full report —
+per session: state, model, context, turns, token totals, an estimated cost, and duration.
 
 ## Multiple sessions — one tidy stack
 
-<p align="center"><img src="docs/stack.png" width="240" alt="Multi-session stack: selected pet with a list of sessions above it"></p>
+<p align="center"><img src="docs/stack.png" width="240" alt="Multi-session stack: the pet with a session picker beneath it, expanded to show all sessions"></p>
 
-Run several Claude Code sessions at once and you get **one cohesive stack**, not a
-mess of windows. The **selected** session shows as the big pet in the corner; all
-your sessions appear in a clean list above it, in a **stable order that never
-shuffles on its own**. Each row shows the session's **title** — the same name
-Claude Code shows in its session list, so renaming a session there renames its
-pet too (falls back to the AI-generated title, then the project folder) — a
-color-coded state dot, and **what that session is doing right now** ("editing
-app.ts", "run Bash", "rate limited"), so you can see at a glance which one needs
-you and why.
+Run several sessions at once and you get **one cohesive stack**, not a mess of windows.
+The selected session is the big pet; a **session picker** sits beneath it. On hover it
+**collapses to the active session** (with a count + chevron, e.g. `5 ⌄`); **click to
+expand** to all of them in a stable, never-reshuffling order. Each row shows the
+session's name (the same one Claude Code uses) and a state dot.
 
-You're in control:
-
-- **Click a session** to select it — its pet becomes the big one (the row gets a
-  highlighted *selected* state). The order doesn't change.
-- **Scroll** over the widget to step the selection through sessions.
-- **Drag a row** up or down to reorder the list however you like.
-- **Drag the pet** (or empty space) to move the whole widget; it stays where you
-  put it.
-
-Sessions appear when they start and disappear when they end (stale ones are
-pruned). A **single session** is just the one pet with its name shown beneath.
+- **Click the picker** to expand; **click a row** to make it the big pet.
+- **Scroll** to step through sessions; **drag a row** (expanded) to reorder.
+- **Drag the pet** to move the whole widget; it stays put.
 
 ## Install
 
@@ -168,10 +108,8 @@ pruned). A **single session** is just the one pet with its name shown beneath.
    **wires the Claude Code hooks itself** on first launch.
 3. Restart Claude Code. Your pet appears and reacts.
 
-Control it from the **✳ menu-bar icon**: show/hide, switch theme, toggle the
-attention alerts and info readouts, get custom pets, load a pet, reset to default,
-reinstall hooks, or uninstall. (No installer scripts — the app installs and removes
-itself, so there's never a quarantine-gated `.command` to fight.)
+Everything is in the **✳ menu-bar icon**: show/hide, theme, alerts, custom pets,
+reinstall hooks, uninstall. (No installer scripts — the app installs and removes itself.)
 
 ### One-click (for technical friends)
 
@@ -202,7 +140,7 @@ Override the grid in `~/.claude-pet/frames.json` (see
 ## How it works
 
 ```
-Claude Code ──hook──▶ ClaudePet --state <s> ──▶ ~/.claude-pet/state.json
+Claude Code ──hook──▶ ClaudePet --state <s> ──▶ ~/.claude-pet/sessions/<id>.json
                                                         │ (watched)
                                           ClaudePet GUI ◀┘  animates overlay
 ```
