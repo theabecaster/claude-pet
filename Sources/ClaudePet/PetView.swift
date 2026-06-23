@@ -10,7 +10,6 @@ final class PetView: NSView {
     var bubbleLabel: String?
     var bubbleDot: NSColor?
     var oneShotFallback: String?
-    var caption: String?
     var detail: String?          // verb / reason for the status pill ("editing main.swift", "rate limited"…)
     var elapsedText: String?     // time-in-state, e.g. "12s"
     var ctxProgress: Double?     // 0…1 context used; drawn as a progress fill on the pill's border

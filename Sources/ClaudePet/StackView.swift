@@ -45,7 +45,6 @@ final class StackView: NSView {
     var expandable: Bool { items.count > 1 }
     private var rowCount: Int { listExpanded ? items.count : 1 }
     private var selectedItem: SessionItem? { items.first { $0.id == selectedID } ?? items.first }
-    private func visibleItems() -> [SessionItem] { listExpanded ? items : (selectedItem.map { [$0] } ?? []) }
     var isReordering: Bool { dragging }    // true mid-drag: sync() must not clobber `items`
 
     // Eased 0…1 expand progress (0 = collapsed to the active row, 1 = all rows). The

@@ -215,7 +215,6 @@ func renderStack(to path: String) {
     _ = NSApplication.shared
     let sv = StackView(frame: NSRect(x: 0, y: 0, width: 232, height: 200))
     sv.primary.cfg = loadFrames(); sv.primary.sprite = loadActiveSprite()
-    sv.primary.caption = "Validate race prediction methodology"
     sv.primary.setState("waiting")
     sv.primary.detail = "permission: run Bash"     // why it needs you (from the Notification hook)
     sv.primary.elapsedText = "2m"                   // time-in-state
@@ -253,7 +252,6 @@ func renderState(_ state: String, to path: String) {
     v.cfg = loadFrames(); v.sprite = loadActiveSprite()
     let env = ProcessInfo.processInfo.environment
     if let t = env["CLAUDEPET_THEME"] { Theme.current = Palette.byID(t) }   // QA preview only
-    v.caption = env["CLAUDEPET_CAPTION"]   // QA preview only
     v.detail  = env["CLAUDEPET_DETAIL"]
     v.elapsedText = env["CLAUDEPET_ELAPSED"]
     v.ctxProgress = env["CLAUDEPET_CTXFRAC"].flatMap { Double($0) }

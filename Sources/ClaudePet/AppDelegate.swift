@@ -413,7 +413,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             stack.items = order.compactMap { id in live[id].map { SessionItem(id: id, state: $0.st.state, label: label(id, $0.st) ?? String(id.prefix(6)), detail: $0.st.detail) } }
         }
         stack.selectedID = selectedID
-        stack.primary.caption = label(selectedID!, sel.st)     // the session name, one line under the pet
         stack.primary.baseState = sel.st.state                 // so a pet-tap reaction settles back here
         stack.primary.detail = sel.st.detail                   // what it's doing / why it needs you
         stack.primary.elapsedText = stateSince[selectedID!].map { compactElapsed(now.timeIntervalSince($0)) }
