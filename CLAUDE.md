@@ -5,8 +5,9 @@ Guidance for working in this repo.
 ## What this is
 
 Claude Pet is a single Swift/AppKit macOS binary that renders a floating desktop pet
-mirroring Claude Code session state in real time. Codex-pet-sprite compatible. One
-source file: `Sources/ClaudePet/main.swift`. No runtime deps; macOS 12+ (WebP via `NSImage`).
+mirroring Claude Code session state in real time. Codex-pet-sprite compatible. The source
+lives in `Sources/ClaudePet/` as one SwiftPM target (one module, internal access throughout)
+split into focused files — see **Source layout** below. No runtime deps; macOS 12+ (WebP via `NSImage`).
 
 ## Commands
 
@@ -30,9 +31,31 @@ CI (`.github/workflows/build.yml`) is the test: clean build **with no warnings**
 CLI smoke tests (session files written/removed). Mirror those when changing interaction
 handlers or the `--state` path.
 
+## Source layout
+
+One SwiftPM target — every file compiles into the same module, so all types/functions are
+mutually visible with no `import` of each other. Top-level executable code lives only in
+`main.swift` (a SwiftPM requirement). Files, leaf → UI → app:
+- `Paths.swift` — state-dir paths + global constants
+- `Theme.swift` — `Palette` presets + `Theme` (current colors)
+- `Codex.swift` — the Codex sprite-atlas contract (`CODEX_ROW_SPECS`, `codexAnimations`)
+- `Config.swift` — `Frames`, `PetState`, `Prefs` (on-disk models)
+- `Humanizers.swift` — `toolVerb`/`errorReason`/`shortModel`/`compact*`/`modelPrices`
+- `Transcript.swift` — `SessionMeta`/`SessionTotals` + transcript scans + context inference
+- `StateModel.swift` — `describe`/`accentFor`/`shortStatus`/`truncated` (state → look)
+- `Mascot.swift` — `drawBuddy` (code-drawn pet), `menuBarImage`, `loadActiveSprite`
+- `PetView.swift` — the prominent pet view + thought-bubble drawing
+- `StackView.swift` — `SessionItem` + the overlay container (picker, drag/scroll, layout)
+- `Hooks.swift` — `HOOK_WIRING`, `HookInput`/stdin, `writeState`, `detailFor`, install/uninstall, `statusLine`
+- `Lifecycle.swift` — singleton `flock`, `guiAlive`, `ensureRunning`
+- `AppDelegate.swift` — the `NSApplication` overlay: menu, sync loop, window framing
+- `CLI.swift` — `statusReport`, the `--render*` previewers, `selfTest`
+- `main.swift` — `argv[1]` dispatch + GUI bootstrap
+
 ## Architecture
 
-Dual-mode, dispatched by `argv[1]` at the bottom of `main.swift`:
+Dual-mode, dispatched by `argv[1]` in `main.swift` (the entry point; every other type and
+function lives in a sibling file of the same target):
 - **CLI mode** (`--state`, `--install-hooks`, `--uninstall-hooks`, `--statusline`, `--render*`,
   `--selftest`, `--status`, `--make-icon`, `--aititle`, `--meta`): does its work, `exit(0)`.
 - **GUI mode** (no args): singleton `flock`, runs the `NSApplication` overlay.
