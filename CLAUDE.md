@@ -47,6 +47,7 @@ mutually visible with no `import` of each other. Top-level executable code lives
 - `PetView.swift` — the prominent pet view + thought-bubble drawing
 - `StackView.swift` — `SessionItem` + the overlay container (picker, drag/scroll, layout)
 - `Hooks.swift` — `HOOK_WIRING`, `HookInput`/stdin, `writeState`, `detailFor`, install/uninstall, `statusLine`
+- `Updater.swift` — in-app updater: GitHub release feed, `semverLess`, download/verify, atomic in-place swap
 - `Lifecycle.swift` — singleton `flock`, `guiAlive`, `ensureRunning`
 - `AppDelegate.swift` — the `NSApplication` overlay: menu, sync loop, window framing
 - `CLI.swift` — `statusReport`, the `--render*` previewers, `selfTest`
