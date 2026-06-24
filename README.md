@@ -109,7 +109,8 @@ session's name (the same one Claude Code uses) and a state dot.
 3. Restart Claude Code. Your pet appears and reacts.
 
 Everything is in the **✳ menu-bar icon**: show/hide, theme, alerts, custom pets,
-reinstall hooks, uninstall. (No installer scripts — the app installs and removes itself.)
+check for updates, reinstall hooks, uninstall. (No installer scripts — the app
+installs, updates, and removes itself.)
 
 ### One-click (for technical friends)
 
@@ -149,6 +150,20 @@ One tiny Swift binary. `--state` writes the file and auto-launches the GUI if it
 isn't running (single-instance via pidfile). `--install-hooks` /
 `--uninstall-hooks` edit `~/.claude/settings.json` **non-destructively and
 idempotently**.
+
+## Updating
+
+The app keeps itself current. On launch it quietly checks the
+[latest release](../../releases/latest) (at most once a day) and, when a newer
+version exists, offers a one-click **Install & Relaunch** — it downloads the new
+build, verifies its signature, swaps itself in place, and reopens. You can also
+trigger it anytime from **✳ menu → Check for Updates…**, or turn the background
+check off with **✳ → Check for Updates Automatically**.
+
+For this to work in place the app must live somewhere writable (e.g.
+**Applications**). If it's still running from the unzipped download, the updater
+points you to the Releases page instead — drag it to **Applications** once and
+one-click updates take over from there.
 
 ## Uninstall
 

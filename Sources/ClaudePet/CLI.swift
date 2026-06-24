@@ -207,6 +207,11 @@ func selfTest() -> Bool {
     check("statusline reclaims+refreshes ours", installStatusLineInto(&slOurs, exe: "/new") &&
           (((slOurs["statusLine"] as? [String: Any])?["command"] as? String)?.contains("/new") ?? false))
 
+    // 11) Updater version comparison drives the in-app "update available" gate.
+    check("semverParts strips v + prerelease", semverParts("v1.2.3-beta") == [1, 2, 3])
+    check("semverLess orders releases", semverLess("1.2.0", "1.10.0") && semverLess("1.2.3", "2.0.0"))
+    check("semverLess is strict + tolerates short", !semverLess("1.2.3", "1.2.3") && !semverLess("1.2", "1.2.0"))
+
     print(ok ? "SELFTEST: ALL PASS" : "SELFTEST: FAILURES")
     return ok
 }
