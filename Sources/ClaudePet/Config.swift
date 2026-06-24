@@ -30,6 +30,7 @@ struct Prefs: Codable {
     var pinDetails: Bool = false        // keep the status pill open instead of reveal-on-hover
     var muted: Bool = false             // master mute for all attention alerts
     var renudge: Bool = true            // re-chime while a session keeps waiting on you
+    var autoCheckUpdates: Bool = true   // silently check GitHub for a newer release on launch
 
     static func load() -> Prefs {
         if let d = try? Data(contentsOf: prefsURL),

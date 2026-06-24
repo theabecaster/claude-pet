@@ -93,6 +93,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem(title: "Reset to Default Pet", action: #selector(resetSprite), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Reinstall Claude Code Hooks", action: #selector(reinstallHooks), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdatesClicked), keyEquivalent: ""))
+        menu.addItem(toggle("Check for Updates Automatically", prefs.autoCheckUpdates, #selector(toggleAutoUpdate)))
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Uninstall Claude Pet…", action: #selector(uninstallSelf), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit Claude Pet", action: #selector(quit), keyEquivalent: "q"))
     }
@@ -207,6 +211,128 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         a.addButton(withTitle: "OK")
         a.runModal()
     }
+
+    // MARK: Updates
+
+    @objc func toggleAutoUpdate() { prefs.autoCheckUpdates.toggle(); prefs.save(); rebuildMenu() }
+    @objc func checkForUpdatesClicked() { checkForUpdates(userInitiated: true) }
+
+    // Hit the GitHub release feed off the main thread; surface results on it. The
+    // silent launch path (userInitiated == false) only speaks up when there's an
+    // update — no "you're up to date" noise, no error if the network's down.
+    func checkForUpdates(userInitiated: Bool) {
+        DispatchQueue.global().async {
+            let latest = fetchLatestRelease()
+            DispatchQueue.main.async {
+                guard let latest = latest else {
+                    if userInitiated {
+                        self.updateAlert("Couldn’t check for updates",
+                                         "Try again in a bit, or grab the latest build from the Releases page.",
+                                         offerReleases: true)
+                    }
+                    return
+                }
+                let cur = currentVersion()
+                guard semverLess(cur, latest.tag) else {
+                    if userInitiated {
+                        self.updateAlert("You’re up to date", "Claude Pet \(cur) is the latest version.")
+                    }
+                    return
+                }
+                self.promptInstall(latest, current: cur)
+            }
+        }
+    }
+
+    private func promptInstall(_ latest: LatestRelease, current: String) {
+        let ver = latest.tag.hasPrefix("v") ? String(latest.tag.dropFirst()) : latest.tag
+        let a = NSAlert()
+        a.messageText = "Update available — Claude Pet \(ver)"
+        var info = "You have \(current)."
+        let notes = latest.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !notes.isEmpty { info += "\n\n" + String(notes.prefix(500)) }
+
+        // No trustworthy in-place target (translocated / not in a writable spot):
+        // point at the Releases page instead of attempting a swap that would fail.
+        guard updatableBundlePath() != nil else {
+            a.informativeText = info + "\n\nMove Claude Pet into /Applications to enable one-click updates."
+            a.addButton(withTitle: "Open Releases Page")
+            a.addButton(withTitle: "Later")
+            if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(releasesPageURL) }
+            return
+        }
+        a.informativeText = info
+        a.addButton(withTitle: "Install & Relaunch")
+        a.addButton(withTitle: "Later")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        installUpdate(latest)
+    }
+
+    private func installUpdate(_ latest: LatestRelease) {
+        guard let dest = updatableBundlePath() else { return }
+        showUpdateProgress("Downloading the update…")     // visible feedback so the wait never reads as a freeze
+        DispatchQueue.global().async {
+            let result = downloadAndStage(latest, into: dest)
+            DispatchQueue.main.async {
+                switch result {
+                case .relaunching:
+                    // Leave the panel up ("Installing…") — the app quits and the helper
+                    // relaunches the new version, so this window goes with it.
+                    self.updateProgressLabel?.stringValue = "Installing — Claude Pet will reopen…"
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { NSApp.terminate(nil) }
+                case .failed(let why):
+                    self.hideUpdateProgress()
+                    self.updateAlert("Update failed",
+                                     "\(why).\n\nYou can download the latest build manually from the Releases page.",
+                                     offerReleases: true)
+                }
+            }
+        }
+    }
+
+    // A tiny, friendly progress panel for the download/install wait. The work runs on
+    // a background queue, so the spinner keeps animating on the main thread.
+    private var updateProgressWindow: NSWindow?
+    private var updateProgressLabel: NSTextField?
+    private func showUpdateProgress(_ text: String) {
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 92),
+                         styleMask: [.titled], backing: .buffered, defer: false)
+        w.title = "Claude Pet"
+        w.isReleasedWhenClosed = false
+        w.level = .floating
+        w.center()
+        let spinner = NSProgressIndicator(frame: NSRect(x: 22, y: 34, width: 24, height: 24))
+        spinner.style = .spinning
+        spinner.startAnimation(nil)
+        let label = NSTextField(labelWithString: text)
+        label.frame = NSRect(x: 58, y: 36, width: 262, height: 20)
+        w.contentView?.addSubview(spinner)
+        w.contentView?.addSubview(label)
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        updateProgressWindow = w
+        updateProgressLabel = label
+    }
+    private func hideUpdateProgress() {
+        updateProgressWindow?.orderOut(nil)
+        updateProgressWindow = nil
+        updateProgressLabel = nil
+    }
+
+    private func updateAlert(_ title: String, _ message: String, offerReleases: Bool = false) {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = message
+        if offerReleases {
+            a.addButton(withTitle: "Open Releases Page")
+            a.addButton(withTitle: "OK")
+            if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(releasesPageURL) }
+        } else {
+            a.addButton(withTitle: "OK")
+            a.runModal()
+        }
+    }
+
     // Self-uninstall so removal never depends on a quarantine-gated script either:
     // unwire the hooks, delete the app's state, then remove the app bundle and quit.
     @objc func uninstallSelf() {
@@ -269,6 +395,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.resizeIfNeeded()          // grow/shrink the panel as details reveal/collapse
         }
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.sync() }
+
+        // Silent, throttled update check shortly after launch — never blocks startup,
+        // and only interrupts the user when there's actually a newer release.
+        if prefs.autoCheckUpdates, shouldAutoCheckNow() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                self?.checkForUpdates(userInitiated: false)
+            }
+        }
     }
 
     // Keep the window matched to the stack's desired height as the bubble (above) and
