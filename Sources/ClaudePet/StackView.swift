@@ -129,7 +129,9 @@ final class StackView: NSView {
             } }
             nameX = row.minX + 32
         } else {
-            nameX = row.minX + 14
+            // Clear the 3pt selected accent bar (inner.minX … inner.minX+3) so the
+            // state dot, which sits at nameX-12, doesn't overlap it.
+            nameX = row.minX + 22
         }
         let dotR: CGFloat = 4
         accentFor(it.state).setFill()
